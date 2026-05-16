@@ -10,3 +10,4 @@
 - Fall back to visible page/block metadata when creating the trailing body block if Roam's open-page UID helper is unavailable.
 - Add theme-friendly CSS that keeps typography, colors, bullets, and outline visuals under Roam/theme control.
 - Fix row divider color on light Roam themes when the operating system prefers dark mode.
+- Use Roam/theme border tokens first, then derive divider color from inherited text color instead of hard-coded colors.

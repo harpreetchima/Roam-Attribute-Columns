@@ -5,14 +5,14 @@
   --rc-row-padding-inline: 0px;
   --rc-row-border-color: var(
     --rm-border-color,
-    var(--bp3-divider-black, rgba(15, 23, 42, 0.12))
+    var(--bp3-divider-black, color-mix(in srgb, currentColor 12%, transparent))
   );
 }
 
 :where(body.bp3-dark, body.bp4-dark, body.bp5-dark) {
   --rc-row-border-color: var(
     --rm-border-color,
-    var(--bp3-divider-white, rgba(226, 232, 240, 0.12))
+    var(--bp3-divider-white, color-mix(in srgb, currentColor 16%, transparent))
   );
 }
 

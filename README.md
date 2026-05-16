@@ -81,7 +81,10 @@ body {
   --rc-label-width: var(--rc-label-width-setting, 18rem);
   --rc-column-gap: var(--rm-block-spacing, 1.5rem);
   --rc-row-padding-block: 6px;
-  --rc-row-border-color: var(--rm-border-color, rgba(15, 23, 42, 0.12));
+  --rc-row-border-color: var(
+    --rm-border-color,
+    color-mix(in srgb, currentColor 12%, transparent)
+  );
 }
 ```
 

@@ -9,3 +9,4 @@
 - Add a native-looking trailing body bullet when a page ends with horizontal attribute rows.
 - Fall back to visible page/block metadata when creating the trailing body block if Roam's open-page UID helper is unavailable.
 - Add theme-friendly CSS that keeps typography, colors, bullets, and outline visuals under Roam/theme control.
+- Fix row divider color on light Roam themes when the operating system prefers dark mode.

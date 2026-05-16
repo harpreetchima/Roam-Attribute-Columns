@@ -16,15 +16,6 @@
   );
 }
 
-@media (prefers-color-scheme: dark) {
-  :where(html:not(.bp3-light)) {
-    --rc-row-border-color: var(
-      --rm-border-color,
-      var(--bp3-divider-white, rgba(226, 232, 240, 0.12))
-    );
-  }
-}
-
 @media screen and (min-width: 900px) {
   :where(
       body.roam-attribute-columns-enabled

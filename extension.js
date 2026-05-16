@@ -1,7 +1,7 @@
 const GLOBAL_KEY = "__roamAttributeColumns";
 const COMMAND_LABEL = "Roam Attribute Columns: Toggle horizontal attributes";
 const SUMMARY_PULL_PATTERN = "[:block/uid {:block/children ...}]";
-const FALLBACK_SUMMARY = "Blocks folded";
+const FALLBACK_SUMMARY = "Folded blocks";
 const FOLDED_SUMMARY_BLOCK_ATTRIBUTE = "data-rc-folded-summary-block";
 const TRAILING_BODY_BLOCK_ATTRIBUTE = "data-rc-trailing-body-block";
 const TRAILING_BODY_PENDING_ATTRIBUTE = "data-rc-trailing-body-pending";
@@ -90,7 +90,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   function summaryTextFromCount(count) {
-    return `${count} ${count === 1 ? "block" : "blocks"} folded`;
+    return `${count} folded ${count === 1 ? "block" : "blocks"}`;
   }
 
   function buildSummaryFromCount(count, pending = false) {
@@ -468,6 +468,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
   function setFoldedSummaryBlockText(block, text) {
     const textElement = block?.querySelector?.(".rm-block-text > span");
+    textElement?.classList.add("rm-page-ref--tag");
     if (textElement && textElement.textContent !== text) {
       textElement.textContent = text;
     }

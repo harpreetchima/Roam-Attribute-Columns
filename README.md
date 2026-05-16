@@ -37,7 +37,7 @@ Roam can reload developer extensions with `control-d control-r`.
 - Enabled globally by default.
 - Uses an `18rem` left property column.
 - Keeps multiple child blocks stacked vertically on the right.
-- Keeps folded attribute rows aligned and shows a display-only count such as `11 blocks folded`.
+- Keeps folded attribute rows aligned and shows a display-only count such as `11 folded blocks`.
 - Counts all folded descendant blocks, not only direct children.
 - Adds a native-looking trailing body bullet when the visible page ends with horizontal attributes.
 - Wraps long property labels inside the fixed left column.
@@ -70,6 +70,8 @@ Roam Attribute Columns keeps Roam's original classes on every block and only add
 Themes can keep styling normal Roam classes like `.rm-block-text`, `.rm-block-children`, `.rm-multibar`, and `.roam-block-container`. Folded count placeholders are inserted with those normal Roam classes, so themes do not need extension-specific selectors for typography, color, bullets, or outline bars. Roam Attribute Columns uses `:where(...)` selectors and targets Roam's native direct children for layout, so helper classes are not required for rows to stay horizontal during Roam rerenders.
 
 The trailing body bullet is also built from normal Roam block classes. Themes can style it the same way they style ordinary empty top-level blocks.
+
+Folded summaries use Roam's native tag color class, so their color follows the same theme rules as tags like `#rolodex/person`.
 
 Optional custom properties:
 

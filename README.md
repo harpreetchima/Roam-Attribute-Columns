@@ -9,7 +9,7 @@ When an attribute block has child blocks, the attribute label stays in a fixed l
 Clone the extension:
 
 ```bash
-git clone https://github.com/harpreetchima/roam-attribute-columns.git
+git clone https://github.com/harpreetchima/Roam-Attribute-Columns.git
 ```
 
 Then load it in Roam:
@@ -18,7 +18,7 @@ Then load it in Roam:
 2. Go to Settings > Extensions.
 3. Enable Developer Mode.
 4. Choose Load Extension.
-5. Select the cloned `roam-attribute-columns` folder.
+5. Select the cloned `Roam-Attribute-Columns` folder.
 
 Roam can reload developer extensions with `control-d control-r`.
 
@@ -39,6 +39,7 @@ Roam can reload developer extensions with `control-d control-r`.
 - Keeps multiple child blocks stacked vertically on the right.
 - Keeps folded attribute rows aligned and shows a display-only count such as `11 folded blocks`.
 - Counts all folded descendant blocks, not only direct children.
+- Refreshes folded counts from Roam graph changes while the row stays folded when Roam's pull-watch API is available.
 - Adds a native-looking trailing body bullet when the visible page ends with horizontal attributes.
 - Wraps long property labels inside the fixed left column.
 - Adds subtle row dividers by default.
@@ -100,3 +101,9 @@ Blueprint-style example:
 
 - `extension.js`: extension lifecycle, settings, command, DOM observer, row marking
 - `extension.css`: two-column layout and responsive behavior
+- `CHANGELOG.md`: release notes
+- `roam-depot-template.json`: metadata starter for a Roam Depot submission
+
+## Roam Depot
+
+This repository is ready for a Roam Depot submission. Copy `roam-depot-template.json` into a Roam Depot fork as `extensions/harpreetchima/Roam-Attribute-Columns.json`, replace `source_commit` with the commit being submitted, and open the Depot pull request.

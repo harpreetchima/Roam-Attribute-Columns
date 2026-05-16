@@ -49,6 +49,9 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   };
 
   const summaryCache = new Map();
+  const summaryWatches = new Map();
+  const pendingSummaryWatches = new Set();
+  const activeClosedRowUids = new Set();
 
   function warn(...args) {
     console.warn("[Roam Attribute Columns]", ...args);
@@ -139,18 +142,141 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     return buildSummaryFromCount(count);
   }
 
-  function pullClosedRowSummary(uid) {
-    const api = typeof window !== "undefined" ? window.roamAlphaAPI : null;
-    const dataApi = api?.data;
-    const pull = dataApi?.pull || api?.pull;
-    if (typeof pull !== "function") return null;
+  function getPullApi() {
+    const dataApi = getRoamDataApi();
+    if (typeof dataApi?.pull === "function") {
+      return {
+        api: dataApi,
+        method: dataApi.pull,
+      };
+    }
 
+    const alphaApi = getRoamAlphaApi();
+    if (typeof alphaApi?.pull === "function") {
+      return {
+        api: alphaApi,
+        method: alphaApi.pull,
+      };
+    }
+
+    return {
+      api: null,
+      method: null,
+    };
+  }
+
+  function pullData(pattern, entity) {
+    const { api, method } = getPullApi();
+    return typeof method === "function" ? method.call(api, pattern, entity) : null;
+  }
+
+  function pullClosedRowSummary(uid) {
     try {
-      const blockData = pull.call(dataApi || api, SUMMARY_PULL_PATTERN, [":block/uid", uid]);
+      const blockData = pullData(SUMMARY_PULL_PATTERN, [":block/uid", uid]);
       return buildApiRowSummary(blockData);
     } catch (error) {
       warn(`Could not pull folded row summary for block ${uid}.`, error);
       return null;
+    }
+  }
+
+  function pullWatchEntity(uid) {
+    return `[:block/uid "${String(uid).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`;
+  }
+
+  function getPullWatchApi(methodName) {
+    const dataApi = getRoamDataApi();
+    const method = dataApi?.[methodName];
+    return typeof method === "function"
+      ? {
+          api: dataApi,
+          method,
+        }
+      : {
+          api: null,
+          method: null,
+        };
+  }
+
+  function removePullWatchEntity(entity, callback) {
+    const { api, method } = getPullWatchApi("removePullWatch");
+    if (typeof method !== "function") return;
+
+    try {
+      const result = method.call(api, SUMMARY_PULL_PATTERN, entity, callback);
+      if (result && typeof result.catch === "function") {
+        result.catch((error) => warn("Could not remove folded summary pull watch.", error));
+      }
+    } catch (error) {
+      warn("Could not remove folded summary pull watch.", error);
+    }
+  }
+
+  function removeClosedRowWatch(uid) {
+    activeClosedRowUids.delete(uid);
+
+    const watch = summaryWatches.get(uid);
+    if (!watch) return;
+
+    summaryWatches.delete(uid);
+    removePullWatchEntity(watch.entity, watch.callback);
+  }
+
+  function removeAllClosedRowWatches() {
+    activeClosedRowUids.clear();
+    pendingSummaryWatches.clear();
+    summaryWatches.forEach((watch) => {
+      removePullWatchEntity(watch.entity, watch.callback);
+    });
+    summaryWatches.clear();
+  }
+
+  async function ensureClosedRowWatch(uid) {
+    if (
+      !uid ||
+      unloaded ||
+      summaryWatches.has(uid) ||
+      pendingSummaryWatches.has(uid)
+    ) {
+      return;
+    }
+
+    const { api, method } = getPullWatchApi("addPullWatch");
+    if (typeof method !== "function") return;
+
+    const entity = pullWatchEntity(uid);
+    const callback = (_before, after) => {
+      if (unloaded) return;
+
+      const summary = buildApiRowSummary(after);
+      if (summary?.hasChildren) {
+        summaryCache.set(uid, summary);
+      } else {
+        summaryCache.delete(uid);
+      }
+
+      scheduleRefresh();
+    };
+
+    pendingSummaryWatches.add(uid);
+
+    try {
+      const result = method.call(api, SUMMARY_PULL_PATTERN, entity, callback);
+      if (result && typeof result.then === "function") await result;
+
+      if (unloaded || !activeClosedRowUids.has(uid)) {
+        removePullWatchEntity(entity, callback);
+        return;
+      }
+
+      summaryWatches.set(uid, {
+        entity,
+        callback,
+      });
+    } catch (error) {
+      warn(`Could not add folded summary pull watch for block ${uid}.`, error);
+    } finally {
+      pendingSummaryWatches.delete(uid);
     }
   }
 
@@ -167,9 +293,18 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   function resolveClosedRowSummary(uid) {
+    const cached = summaryCache.get(uid);
+    if (cached?.hasChildren && (summaryWatches.has(uid) || pendingSummaryWatches.has(uid))) {
+      return {
+        ...cached,
+        pending: false,
+      };
+    }
+
     const summary = pullClosedRowSummary(uid);
     if (summary) {
-      summaryCache.set(uid, summary);
+      if (summary.hasChildren) summaryCache.set(uid, summary);
+      else summaryCache.delete(uid);
       return summary;
     }
 
@@ -585,6 +720,69 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     return result && typeof result.then === "function" ? await result : result;
   }
 
+  function getPageTitleFromBlock(block) {
+    return (
+      block?.getAttribute?.("data-page-title") ||
+      block?.closest?.("[data-page-title]")?.getAttribute?.("data-page-title") ||
+      ""
+    );
+  }
+
+  function getVisibleMainWindowTitle() {
+    if (typeof document === "undefined") return "";
+
+    const titleElement = document.querySelector(
+      ".roam-main .roam-body-main .rm-title-display, " +
+        ".roam-main .roam-body-main .rm-title-textarea"
+    );
+
+    if ("value" in (titleElement || {})) {
+      return normalizeText(titleElement.value);
+    }
+
+    return visibleText(titleElement);
+  }
+
+  function pullPageUidByTitle(title) {
+    if (!title) return "";
+
+    try {
+      const page = pullData("[:block/uid]", [":node/title", title]);
+      return getKeywordValue(page, ":block/uid") || "";
+    } catch (error) {
+      warn(`Could not pull page UID for "${title}".`, error);
+      return "";
+    }
+  }
+
+  function pullPageUidForBlockUid(uid) {
+    if (!uid) return "";
+
+    try {
+      const block = pullData("[{:block/page [:block/uid]}]", [":block/uid", uid]);
+      const page = getKeywordValue(block, ":block/page");
+      return getKeywordValue(page, ":block/uid") || "";
+    } catch (error) {
+      warn(`Could not pull page UID for block ${uid}.`, error);
+      return "";
+    }
+  }
+
+  async function getTrailingBodyParentUid(triggerBlock) {
+    const openUid = await getOpenPageOrBlockUid();
+    if (openUid) return openUid;
+
+    const container = triggerBlock?.parentElement;
+    const blocks = directTopLevelBlocks(container);
+    const lastRealBlock = blocks[blocks.length - 1];
+    const pageUid = pullPageUidForBlockUid(getBlockUid(lastRealBlock));
+    if (pageUid) return pageUid;
+
+    const pageTitle = getPageTitleFromBlock(lastRealBlock) || getVisibleMainWindowTitle();
+
+    return pullPageUidByTitle(pageTitle);
+  }
+
   function generateUid() {
     const generate = getRoamAlphaApi()?.util?.generateUID;
     return typeof generate === "function" ? generate() : "";
@@ -627,14 +825,13 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     }
   }
 
-  async function createTrailingBodyBlockInGraph() {
+  async function createTrailingBodyBlockInGraph(parentUid) {
     const dataApi = getRoamDataApi();
     const createBlock = dataApi?.block?.create;
     if (typeof createBlock !== "function") {
       throw new Error("Roam block creation API is unavailable.");
     }
 
-    const parentUid = await getOpenPageOrBlockUid();
     if (!parentUid) throw new Error("Could not determine the current page or block UID.");
 
     const uid = generateUid();
@@ -660,10 +857,11 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
     creatingTrailingBodyBlock = true;
     block?.setAttribute?.(TRAILING_BODY_PENDING_ATTRIBUTE, "true");
-    removeTrailingBodyBlocks();
 
     try {
-      const uid = await createTrailingBodyBlockInGraph();
+      const parentUid = await getTrailingBodyParentUid(block);
+      removeTrailingBodyBlocks();
+      const uid = await createTrailingBodyBlockInGraph(parentUid);
       await focusBlock(uid);
     } catch (error) {
       warn("Could not create trailing body block.", error);
@@ -703,6 +901,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
   function markRow(row, descriptor) {
     const parts = getRowParts(row);
+    const uid = getBlockUid(row);
     row.classList.add(CLASSES.row);
     row.classList.toggle(CLASSES.closed, Boolean(descriptor?.closed));
     row.classList.toggle(CLASSES.summaryPending, Boolean(descriptor?.summary?.pending));
@@ -710,9 +909,14 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     parts.values?.classList.add(CLASSES.values);
 
     if (descriptor?.closed) {
+      if (uid) {
+        activeClosedRowUids.add(uid);
+        void ensureClosedRowWatch(uid);
+      }
       applyRowSummary(row, descriptor.summary);
       ensureFoldedSummaryBlock(parts.values, descriptor.summary);
     } else {
+      if (uid) removeClosedRowWatch(uid);
       clearRowData(row);
       removeFoldedSummaryBlock(parts.values);
     }
@@ -720,6 +924,8 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
   function unmarkRow(row) {
     const parts = getRowParts(row);
+    const uid = getBlockUid(row);
+    if (uid) removeClosedRowWatch(uid);
     row.classList.remove(CLASSES.row, CLASSES.closed, CLASSES.summaryPending);
     clearRowData(row);
     removeFoldedSummaryBlock(parts.values);
@@ -984,6 +1190,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     removeCommand();
     clearRowMarks();
     clearDocumentSettings();
+    removeAllClosedRowWatches();
     summaryCache.clear();
 
     console.log("[Roam Attribute Columns] Unloaded.");

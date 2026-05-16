@@ -1,0 +1,8 @@
+{
+  "name": "Roam Attribute Columns",
+  "short_description": "Display Roam attributes in fixed-width columns while preserving native child blocks.",
+  "author": "Harpreet Chima",
+  "source_url": "https://github.com/harpreetchima/Roam-Attribute-Columns",
+  "source_repo": "https://github.com/harpreetchima/Roam-Attribute-Columns.git",
+  "source_commit": "REPLACE_WITH_RELEASE_COMMIT_SHA"
+}

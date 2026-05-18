@@ -22,6 +22,20 @@ Then load it in Roam:
 
 Roam can reload developer extensions with `control-d control-r`.
 
+## Remote Developer Extension
+
+After the GitHub Pages deployment finishes, this extension can be loaded in Roam's remote developer extension field with:
+
+```text
+https://harpreetchima.github.io/Roam-Attribute-Columns/
+```
+
+Roam will load the required files from:
+
+- `https://harpreetchima.github.io/Roam-Attribute-Columns/README.md`
+- `https://harpreetchima.github.io/Roam-Attribute-Columns/extension.js`
+- `https://harpreetchima.github.io/Roam-Attribute-Columns/extension.css`
+
 ## Install Locally
 
 1. Open Roam Research.

@@ -2,7 +2,7 @@
 
 Roam Attribute Columns is a Roam Research extension that displays attribute blocks as horizontal rows.
 
-When an attribute block has child blocks, the attribute label stays in a fixed left column and the child blocks move into a right column. The right side remains native Roam: bullets, nested blocks, vertical bars, editing, and wrapping stay intact.
+When an attribute block has child blocks, the label appears on the left and the children appear on the right. Roam keeps its native bullets, outline bars, and editors in both columns.
 
 ## Install From GitHub
 
@@ -51,13 +51,14 @@ Roam can reload developer extensions with `control-d control-r`.
 ## Behavior
 
 - Enabled globally by default.
-- Uses an `18rem` left property column.
+- Attribute rows work at any outline depth, including beneath ordinary child blocks. A label such as `Version History::` stays in its column while you edit it.
+- The top-level label column starts at `18rem`. Nested label widths scale with the space available. Drag a divider to resize all rows at its nesting depth. Double-click it to reset that depth, or press Escape during a drag to cancel.
 - Keeps multiple child blocks stacked vertically on the right.
 - Keeps folded attribute rows aligned and shows a display-only count such as `11 folded blocks`.
 - Counts all folded descendant blocks, not only direct children.
 - Refreshes folded counts from Roam graph changes while the row stays folded when Roam's pull-watch API is available.
 - Adds a native-looking trailing body bullet when the visible page ends with horizontal attributes.
-- Wraps long property labels inside the fixed left column.
+- Labels use the space between the bullet and divider and wrap at word boundaries. Long unbroken words can wrap within the column.
 - Adds subtle row dividers by default.
 - Falls back to normal Roam layout below `900px` viewport width.
 - Does not modify graph data for layout. The trailing body bullet creates and focuses a real empty top-level block only when clicked or activated with Enter.
@@ -67,7 +68,8 @@ Roam can reload developer extensions with `control-d control-r`.
 The extension adds a `Roam Attribute Columns` settings panel:
 
 - Enable horizontal attributes
-- Label column width
+- Label column width (top-level rows)
+- Reset column widths (restores all depths)
 - Show row dividers
 
 It also adds this command palette command:
@@ -78,13 +80,16 @@ No default hotkey is assigned.
 
 ## Theming
 
-Roam Attribute Columns keeps Roam's original classes on every block and only adds low-specificity helper classes for the horizontal layout:
+Roam Attribute Columns adds these classes alongside Roam's original classes.
 
 - `rc-attribute-row`
 - `rc-attribute-label`
 - `rc-attribute-values`
+- `rc-column-resizer`
 
-Themes can keep styling normal Roam classes like `.rm-block-text`, `.rm-block-children`, `.rm-multibar`, and `.roam-block-container`. Folded count placeholders are inserted with those normal Roam classes, so themes do not need extension-specific selectors for typography, color, bullets, or outline bars. Roam Attribute Columns uses `:where(...)` selectors and targets Roam's native direct children for layout, so helper classes are not required for rows to stay horizontal during Roam rerenders.
+Each row has a `data-rc-depth` attribute. Outermost attribute rows have depth `0`, and each enclosing attribute row adds one level.
+
+Themes can keep styling normal Roam classes like `.rm-block-text`, `.rm-block-children`, `.rm-multibar`, and `.roam-block-container`. Folded count placeholders are inserted with those normal Roam classes, so themes do not need extension-specific selectors for typography, color, bullets, or outline bars. The stylesheet uses `:where(...)` selectors and targets each row’s native label and child container directly.
 
 The trailing body bullet is also built from normal Roam block classes. Themes can style it the same way they style ordinary empty top-level blocks.
 
@@ -95,7 +100,7 @@ Optional custom properties:
 ```css
 body {
   --rc-label-width: var(--rc-label-width-setting, 18rem);
-  --rc-column-gap: var(--rm-block-spacing, 1.5rem);
+  --rc-column-gap: 0.75rem;
   --rc-row-padding-block: 6px;
   --rc-row-border-color: var(
     --rm-border-color,

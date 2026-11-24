@@ -2,6 +2,9 @@
 
 ## 2026-11-23
 
+- Hide vertical bars between attribute labels and values at every nesting depth. The resize guide appears in the middle of the gap on hover or drag. Ordinary value outlines keep their bars.
+- Keep `roam/meta::`, Roam `:attr/proxy` pages, and custom **Pass-through attributes** configured in extension settings as collapsible headers without increasing column depth. Attributes ending in only `#.class` or `#[[.class]]` keep their child-value layout while viewing and editing.
+- Read Roam’s derived `:harc/_a-source` relationships when available to distinguish inline values from child values. Classic graphs continue to use label detection. Themes can identify harc-backed rows, their harc UIDs, relationship attributes, and pass-through headers through `data-rc-*` attributes.
 - Display attribute columns at any nesting depth and keep labels aligned while editing.
 - Reclaim unused label space and wrap text at word boundaries across the full column width.
 - Drag dividers to save a width for each attribute nesting depth. Double-click to reset that depth, or use **Reset column widths** in Settings to restore all defaults.

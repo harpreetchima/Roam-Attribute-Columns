@@ -36,8 +36,9 @@
     display: grid !important;
     grid-template-columns:
       minmax(0, clamp(var(--rc-min-label), var(--rc-row-label-width), var(--rc-max-label)))
+      var(--rc-used-gap)
       minmax(0, 1fr);
-    column-gap: var(--rc-used-gap);
+    column-gap: 0;
     align-items: start;
     box-sizing: border-box;
     min-width: 0;
@@ -101,15 +102,19 @@
     width: 100% !important;
   }
 
-  :where(.rc-attribute-row > .rm-block-children) {
-    grid-column: 2;
+  :where(.rc-attribute-row > :is(.rm-block-children, [data-rc-folded-summary-block])) {
+    grid-column: 3;
     grid-row: 1;
     box-sizing: border-box;
     min-width: 0;
     max-width: 100% !important;
     width: 100% !important;
-    margin-left: 0 !important;
-    padding-left: 0 !important;
+    margin-inline: 0 !important;
+    padding-inline-start: 0 !important;
+  }
+
+  :where(.roam-attribute-columns-enabled .roam-article .rc-attribute-row > .rm-block-children > .rm-multibar) {
+    display: none !important;
   }
 
   :where(.rc-attribute-row :is(.roam-block-container, .rm-block-main, .rm-block-children, .rm-block__input)) {
@@ -127,15 +132,15 @@
   }
 
   :where(.rc-attribute-row > .rc-column-resizer) {
-    grid-column: 1;
+    /* The middle track is the gutter, including when its width is a percentage. */
+    grid-column: 2;
     grid-row: 1;
-    justify-self: end;
+    justify-self: center;
     align-self: stretch;
     position: relative;
     z-index: 1;
     display: block;
     width: 12px;
-    margin-inline-end: -6px;
     cursor: col-resize;
     touch-action: none;
     user-select: none;

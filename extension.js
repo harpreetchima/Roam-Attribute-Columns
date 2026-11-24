@@ -1,6 +1,11 @@
 const GLOBAL_KEY = "__roamAttributeColumns";
 const COMMAND_LABEL = "Roam Attribute Columns: Toggle horizontal attributes";
 const SUMMARY_PULL_PATTERN = "[:block/uid {:block/children ...}]";
+const ATTRIBUTE_PULL_PATTERN = `[:block/string
+  {:harc/_a-source [:block/uid {:harc/e [:block/uid {:harc/a [:block/uid]}]}
+                    {:harc/a [:block/uid :node/title :attr/proxy]}
+                    {:harc/v [:block/uid]} {:harc/v-source [:block/uid]}]}]`;
+const CLASS_TAG_SYNTAX = /#\[\[\.[^\]]+\]\]|#\.[^\s#[\]]+/gu;
 const FALLBACK_SUMMARY = "Folded blocks";
 const FOLDED_SUMMARY_BLOCK_ATTRIBUTE = "data-rc-folded-summary-block";
 const TRAILING_BODY_BLOCK_ATTRIBUTE = "data-rc-trailing-body-block";
@@ -15,12 +20,14 @@ const SETTINGS_KEYS = {
   enabled: "enabled",
   labelWidth: "labelWidth",
   nestedLabelWidths: "nestedLabelWidths",
+  passthroughAttributes: "passthroughAttributes",
   rowDividers: "rowDividers",
 };
 
 const DEFAULTS = {
   enabled: true,
   labelWidth: "18rem",
+  passthroughAttributes: "",
   rowDividers: true,
 };
 
@@ -40,7 +47,10 @@ const CSS_VARS = {
   labelWidthSetting: "--rc-label-width-setting",
 };
 
-const ROW_DATA_ATTRIBUTES = ["data-rc-summary", "data-rc-child-count"];
+const SUMMARY_ATTRIBUTES = ["data-rc-summary", "data-rc-child-count"];
+const HARC_ATTRIBUTES = ["data-rc-attr-model", "data-rc-harc-uid", "data-rc-attr-role"];
+const PASSTHROUGH_ATTRIBUTE = "data-rc-passthrough";
+const HARC_SELECTOR = HARC_ATTRIBUTES.map((key) => `[${key}]`).join(", ");
 
 function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   let mutationObserver = null;
@@ -56,10 +66,12 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
   let settings = {
     ...DEFAULTS,
+    nestedLabelWidths: {},
+    passthroughAttributeSet: new Set(),
   };
 
   const summaryCache = new Map();
-  const markedRows = new Set();
+  const markedBlocks = new Set();
   const appliedNestedDepths = new Set();
   const savingSettings = new Map();
   const summaryWatches = new Map();
@@ -101,7 +113,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   function getKeywordValue(object, keyword) {
     if (!object) return undefined;
     const bareKeyword = keyword.replace(/^:/, "");
-    return object[keyword] ?? object[bareKeyword];
+    return object[keyword] ?? object[bareKeyword] ?? object[bareKeyword.split("/").pop()];
   }
 
   function summaryTextFromCount(count) {
@@ -385,6 +397,21 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     return fallback;
   }
 
+  function parsePassthroughAttributes(raw) {
+    const names = new Set();
+    if (typeof raw !== "string") return names;
+    for (const part of raw.split(/[,\r\n]+/)) {
+      const cleaned = part
+        .trim()
+        .replace(/:{1,2}$/, "")
+        .trim()
+        .replace(/^\[\[([\s\S]+)\]\]$/, "$1")
+        .trim();
+      if (cleaned) names.add(cleaned);
+    }
+    return names;
+  }
+
   function readSettings() {
     const savedWidths = getSetting(SETTINGS_KEYS.nestedLabelWidths);
     const nestedLabelWidths = {};
@@ -394,8 +421,13 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
         if (/^[1-9]\d*$/.test(depth) && length) nestedLabelWidths[depth] = length;
       }
     }
+    const rawPassthrough = getSetting(SETTINGS_KEYS.passthroughAttributes);
+    const passthroughAttributes =
+      typeof rawPassthrough === "string" ? rawPassthrough : DEFAULTS.passthroughAttributes;
     settings = {
       nestedLabelWidths,
+      passthroughAttributes,
+      passthroughAttributeSet: parsePassthroughAttributes(passthroughAttributes),
       enabled: normalizeBoolean(getSetting(SETTINGS_KEYS.enabled), DEFAULTS.enabled),
       labelWidth: normalizeCssLength(getSetting(SETTINGS_KEYS.labelWidth), DEFAULTS.labelWidth),
       rowDividers: normalizeBoolean(getSetting(SETTINGS_KEYS.rowDividers), DEFAULTS.rowDividers),
@@ -427,6 +459,10 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     }
     if (key === SETTINGS_KEYS.labelWidth) {
       nextValue = normalizeCssLength(rawValue, DEFAULTS.labelWidth);
+    }
+    if (key === SETTINGS_KEYS.passthroughAttributes) {
+      nextValue = typeof rawValue === "string" ? rawValue : DEFAULTS.passthroughAttributes;
+      settings.passthroughAttributeSet = parsePassthroughAttributes(nextValue);
     }
 
     settings[key] = nextValue;
@@ -480,30 +516,121 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     return editor && editor.closest?.(".rm-block-main") === main ? editor : null;
   }
 
-  function getAttributeRowDescriptor(block) {
-    if (!block?.matches?.(".roam-block-container")) return { eligible: false };
-    if (block.closest(INJECTED_SELECTOR)) {
-      return { eligible: false };
+  function hasBlankRenderedTail(blockText, ref) {
+    const range = document.createRange();
+    range.selectNodeContents(blockText);
+    range.setStartAfter(ref);
+
+    // Images and other inline values can render without a text node.
+    for (const value of blockText.querySelectorAll("img, video, audio, iframe, canvas, input, button, hr")) {
+      if (range.intersectsNode(value) && !value.closest('[data-tag^="."]')) return false;
     }
 
-    const { label: main, values: children } = getRowParts(block);
-    if (!main || !children) return { eligible: false };
+    // Only ignore markup attached to a rendered dot tag. Its hash and
+    // link brackets can be separate siblings, even when the tag is hidden.
+    let expectClosingBrackets = false;
+    for (const tag of blockText.querySelectorAll('[data-tag^="."]')) {
+      if (!range.intersectsNode(tag) || tag.contains(ref)) continue;
+      range.setEndBefore(tag);
+      const beforeTag = expectClosingBrackets ? /^\]\]\s*#?(\[\[)?$/ : /^\s*#?(\[\[)?$/;
+      const match = beforeTag.exec(range.toString());
+      if (!match) return false;
+      expectClosingBrackets = Boolean(match[1]);
+      range.setStartAfter(tag);
+      range.setEnd(blockText, blockText.childNodes.length);
+    }
+    return expectClosingBrackets ? /^\]\]\s*$/.test(range.toString()) : !range.toString().trim();
+  }
 
+  function readAttributeLabel(main) {
     const editor = findBlockEditor(main);
     if (editor) {
-      const text = editor.value;
-      const delimiter = text.indexOf("::");
-      if (
-        /[\r\n]/.test(text) || delimiter < 1 ||
-        !text.slice(0, delimiter).trim() || text.slice(delimiter + 2).trim()
-      ) return { eligible: false };
-    } else {
-      const blockText = directChildMatching(main, ".rm-block-text");
-      const attrText = visibleText(blockText?.querySelector(".rm-attr-ref"));
-      if (!attrText || visibleText(blockText) !== attrText) return { eligible: false };
+      const match = /^([^\r\n]+?)::([\s\S]*)$/.exec(editor.value);
+      const name = match?.[1].trim();
+      if (!name) return null;
+      return {
+        title: name.replace(/^\[\[([\s\S]+)\]\]$/, "$1"),
+        editor,
+        hasBlankTail: () => !match[2].replace(CLASS_TAG_SYNTAX, "").trim(),
+      };
     }
 
+    const blockText = directChildMatching(main, ".rm-block-text");
+    const ref = blockText?.querySelector(".rm-attr-ref");
+    if (!ref || ref.closest(".rm-block-text") !== blockText || blockText.contains(ref.closest(".rm-block-ref"))) {
+      return null;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(blockText);
+    range.setEndBefore(ref);
+    if (range.toString().trim()) return null;
+
+    const linkSelector = "[data-link-title], [data-link-uid]";
+    const wrapper = ref.closest(linkSelector);
+    const link = blockText.contains(wrapper) ? wrapper : ref.querySelector(linkSelector);
+    const page = link?.dataset || {};
+    const title = page.linkTitle || ref.textContent.trim().replace(/:{1,2}$/, "").trim();
+    if (!title && !page.linkUid) return null;
+
+    return { title, pageUid: page.linkUid, hasBlankTail: () => hasBlankRenderedTail(blockText, ref) };
+  }
+
+  function cachedAttributePull(cache, pattern, key, value) {
+    const lookup = `${key} ${value}`;
+    if (!cache.has(lookup)) {
+      let result = null;
+      try {
+        result = pullData(pattern, [key, value]);
+      } catch {
+        // Older graphs can reject unknown attributes. Use the rendered label.
+      }
+      cache.set(lookup, result);
+    }
+    return cache.get(lookup);
+  }
+
+  function isPassThroughTitle(title) {
+    const normalized = String(title || "").trim();
+    return (
+      normalized === "roam/meta" ||
+      Boolean(normalized && settings.passthroughAttributeSet?.has(normalized))
+    );
+  }
+
+  function isPassThroughPage(page) {
+    return isPassThroughTitle(getKeywordValue(page, ":node/title")) || getKeywordValue(page, ":attr/proxy") === true;
+  }
+
+  function refs(entity, keyword) {
+    const value = getKeywordValue(entity, keyword);
+    return Array.isArray(value) ? value : value ? [value] : [];
+  }
+
+  function getAttributeRowDescriptor(block, cache) {
+    if (block.closest(INJECTED_SELECTOR)) return { eligible: false };
+    const { label: main, values: children } = getRowParts(block);
+    const label = readAttributeLabel(main);
+    if (!label) return { eligible: false };
+    if (isPassThroughTitle(label.title)) return { eligible: false, passthrough: true };
+
     const uid = getBlockUid(block);
+    const source = uid && cachedAttributePull(cache.blocks, ATTRIBUTE_PULL_PATTERN, ":block/uid", uid);
+    const savedText = getKeywordValue(source, ":block/string");
+    // The editor can be ahead of Roam's derived assertion until the edit is saved.
+    const draft = label.editor && typeof savedText === "string" && label.editor.value !== savedText;
+    const harc = draft ? null : refs(source, ":harc/_a-source")[0];
+    if (harc) {
+      if (refs(harc, ":harc/a").some(isPassThroughPage)) return { eligible: false, passthrough: true };
+      if (refs(harc, ":harc/v-source").some((value) => getKeywordValue(value, ":block/uid") === uid)) {
+        return { eligible: false };
+      }
+    } else {
+      const key = label.pageUid ? ":block/uid" : ":node/title";
+      const page = cachedAttributePull(cache.pages, "[:node/title :attr/proxy]", key, label.pageUid || label.title);
+      if (isPassThroughPage(page)) return { eligible: false, passthrough: true };
+      if (!label.hasBlankTail()) return { eligible: false };
+    }
+
     const closed = block.classList.contains("rm-block--closed");
 
     if (closed) {
@@ -514,6 +641,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
       return {
         eligible: true,
+        harc,
         closed: true,
         summary,
       };
@@ -529,6 +657,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
     return {
       eligible: true,
+      harc,
       closed: false,
       summary: null,
     };
@@ -664,6 +793,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     }
 
     setFoldedSummaryBlockText(block, summary?.summary || FALLBACK_SUMMARY);
+    return block;
   }
 
   function removeFoldedSummaryBlock(values) {
@@ -983,7 +1113,8 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   function beginDrag(event, handle) {
     if (drag || event.button !== 0 || event.isPrimary === false) return;
     const row = handle.parentElement;
-    const { label, values } = getRowParts(row);
+    const { label, values: children } = getRowParts(row);
+    const values = children || foldedSummaryBlock(row);
     if (!label || !values) return;
 
     const style = getComputedStyle(row);
@@ -1062,13 +1193,9 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     if (event.target.matches?.(EDITOR_SELECTOR)) scheduleRefresh();
   }
 
-  function clearRowData(row) {
-    ROW_DATA_ATTRIBUTES.forEach((attribute) => row.removeAttribute(attribute));
-  }
-
   function applyRowSummary(row, summary) {
     if (!summary) {
-      clearRowData(row);
+      SUMMARY_ATTRIBUTES.forEach((key) => row.removeAttribute(key));
       return;
     }
 
@@ -1078,12 +1205,25 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
   function markRow(row, descriptor, depth) {
     const parts = getRowParts(row);
-    markedRows.add(row);
+    markedBlocks.add(row);
+    row.removeAttribute(PASSTHROUGH_ATTRIBUTE);
+    const harc = descriptor.harc;
+    if (harc) row.dataset.rcAttrModel = "harc";
+    else delete row.dataset.rcAttrModel;
+    const harcUid = getKeywordValue(harc, ":block/uid");
+    if (harcUid) row.dataset.rcHarcUid = harcUid;
+    else delete row.dataset.rcHarcUid;
+    if (refs(harc, ":harc/e").some((entity) => refs(entity, ":harc/a").length)) {
+      row.dataset.rcAttrRole = "relationship";
+    } else {
+      delete row.dataset.rcAttrRole;
+    }
     row.classList.toggle(CLASSES.row, true);
     row.classList.toggle(CLASSES.closed, descriptor.closed);
     row.classList.toggle(CLASSES.summaryPending, Boolean(descriptor.summary?.pending));
     parts.label.classList.toggle(CLASSES.label, true);
-    parts.values.classList.toggle(CLASSES.values, true);
+    parts.values?.classList.toggle(CLASSES.values, true);
+    if (parts.values) removeFoldedSummaryBlock(row);
     if (row.dataset.rcDepth !== String(depth)) row.dataset.rcDepth = String(depth);
     if (depth) {
       row.style.setProperty(
@@ -1095,36 +1235,49 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     }
     ensureResizer(row);
 
+    applyRowSummary(row, descriptor.summary);
     if (descriptor.closed) {
-      applyRowSummary(row, descriptor.summary);
-      ensureFoldedSummaryBlock(parts.values, descriptor.summary);
+      // A folded outline may omit its native children container altogether.
+      const summaryBlock = ensureFoldedSummaryBlock(parts.values || row, descriptor.summary);
+      if (!parts.values) summaryBlock.classList.toggle(CLASSES.values, true);
     } else {
-      clearRowData(row);
       removeFoldedSummaryBlock(parts.values);
     }
   }
 
   function unmarkRow(row) {
     const parts = getRowParts(row);
-    markedRows.delete(row);
+    markedBlocks.delete(row);
     row.classList.remove(CLASSES.row, CLASSES.closed, CLASSES.summaryPending);
-    clearRowData(row);
+    applyRowSummary(row, null);
+    HARC_ATTRIBUTES.forEach((key) => row.removeAttribute(key));
+    row.removeAttribute(PASSTHROUGH_ATTRIBUTE);
     delete row.dataset.rcDepth;
     row.style.removeProperty("--rc-row-label-width");
     directChildMatching(row, `[${RESIZER_ATTRIBUTE}]`)?.remove();
+    removeFoldedSummaryBlock(row);
     removeFoldedSummaryBlock(parts.values);
     parts.label?.classList.remove(CLASSES.label);
     parts.values?.classList.remove(CLASSES.values);
   }
 
   function clearStrayPartMarks() {
+    document.querySelectorAll(HARC_SELECTOR).forEach((block) => {
+      if (!markedBlocks.has(block) || !block.classList.contains(CLASSES.row)) {
+        HARC_ATTRIBUTES.forEach((key) => block.removeAttribute(key));
+      }
+    });
+    document.querySelectorAll(`[${PASSTHROUGH_ATTRIBUTE}]`).forEach((block) => {
+      if (!markedBlocks.has(block)) block.removeAttribute(PASSTHROUGH_ATTRIBUTE);
+    });
     document.querySelectorAll(`.${CLASSES.label}, .${CLASSES.values}`).forEach((element) => {
       if (!element.parentElement?.classList.contains(CLASSES.row)) {
         element.classList.remove(CLASSES.label, CLASSES.values);
       }
     });
     document.querySelectorAll(`[${FOLDED_SUMMARY_BLOCK_ATTRIBUTE}]`).forEach((element) => {
-      if (!element.parentElement?.matches(`.${CLASSES.row}.${CLASSES.closed} > .rm-block-children`)) {
+      const closedRow = `.${CLASSES.row}.${CLASSES.closed}`;
+      if (!element.parentElement?.matches(`${closedRow}, ${closedRow} > .rm-block-children`)) {
         element.remove();
       }
     });
@@ -1144,22 +1297,31 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     }
 
     const candidates = new Map();
+    const cache = { blocks: new Map(), pages: new Map() };
     const childDepths = new WeakMap();
     activeClosedRowUids.clear();
     // querySelectorAll visits parents first. Ordinary blocks pass the depth through.
     for (const block of collectMainWindowBlocks()) {
       const parent = block.parentElement?.closest(".roam-block-container");
       const depth = childDepths.get(parent) || 0;
-      const descriptor = getAttributeRowDescriptor(block);
+      const descriptor = getAttributeRowDescriptor(block, cache);
       childDepths.set(block, depth + Number(descriptor.eligible));
-      if (!descriptor.eligible) continue;
+      if (!descriptor.eligible && !descriptor.passthrough) continue;
       candidates.set(block, { descriptor, depth });
       if (descriptor.closed) activeClosedRowUids.add(getBlockUid(block));
     }
-    markedRows.forEach((row) => {
+    markedBlocks.forEach((row) => {
       if (!candidates.has(row)) unmarkRow(row);
     });
-    candidates.forEach(({ descriptor, depth }, row) => markRow(row, descriptor, depth));
+    candidates.forEach(({ descriptor, depth }, block) => {
+      if (descriptor.passthrough) {
+        if (block.classList.contains(CLASSES.row)) unmarkRow(block);
+        markedBlocks.add(block);
+        block.setAttribute(PASSTHROUGH_ATTRIBUTE, "true");
+      } else {
+        markRow(block, descriptor, depth);
+      }
+    });
     summaryWatches.forEach((_, uid) => {
       if (!activeClosedRowUids.has(uid)) removeClosedRowWatch(uid);
     });
@@ -1175,7 +1337,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
   function clearRowMarks() {
     if (typeof document === "undefined") return;
-    markedRows.forEach(unmarkRow);
+    markedBlocks.forEach(unmarkRow);
     document.querySelectorAll(`.${CLASSES.row}, [data-rc-depth]`).forEach(unmarkRow);
     clearStrayPartMarks();
     removeTrailingBodyBlocks();
@@ -1227,7 +1389,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
       subtree: true,
       attributes: true,
       characterData: true,
-      attributeFilter: ["class", "data-block-uid", "data-page-links"],
+      attributeFilter: ["class", "data-block-uid", "data-page-links", "data-link-uid", "data-link-title", "data-tag"],
     });
   }
 
@@ -1279,6 +1441,22 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
               saveWidth(0, null),
               updateSetting(SETTINGS_KEYS.nestedLabelWidths, {}),
             ]),
+          },
+        },
+        {
+          id: SETTINGS_KEYS.passthroughAttributes,
+          name: "Pass-through attributes",
+          description:
+            "Comma-separated attribute names kept as collapsible headers while their child attributes use the parent column depth. roam/meta and Roam's :attr/proxy pages are always included.",
+          action: {
+            type: "input",
+            placeholder: "Metadata, Frontmatter",
+            onChange: (eventOrValue) => {
+              void updateSetting(
+                SETTINGS_KEYS.passthroughAttributes,
+                readInputValue(eventOrValue, settings.passthroughAttributes)
+              );
+            },
           },
         },
         {
@@ -1350,6 +1528,10 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
     await setSettingDefault(SETTINGS_KEYS.enabled, DEFAULTS.enabled);
     await setSettingDefault(SETTINGS_KEYS.labelWidth, DEFAULTS.labelWidth);
+    await setSettingDefault(
+      SETTINGS_KEYS.passthroughAttributes,
+      DEFAULTS.passthroughAttributes
+    );
     await setSettingDefault(SETTINGS_KEYS.rowDividers, DEFAULTS.rowDividers);
 
     if (unloaded) return;

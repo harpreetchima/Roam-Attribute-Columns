@@ -2,7 +2,7 @@
 
 Roam Attribute Columns is a Roam Research extension that displays attribute blocks as horizontal rows.
 
-When an attribute block has child blocks, the label appears on the left and the children appear on the right. Roam keeps its native bullets, outline bars, and editors in both columns.
+An attribute such as `Status::` displays its children in the next column. Native bullets and editors stay in place. The space between columns is clear until you hover over or drag the resize handle. Ordinary outlines within a value keep their vertical bars.
 
 ## Install From GitHub
 
@@ -51,6 +51,8 @@ Roam can reload developer extensions with `control-d control-r`.
 ## Behavior
 
 - Enabled globally by default.
+- A blank attribute tail or one containing only Roam class tags (`#.wide` or `#[[.wide]]`) keeps child blocks in the value column, including while editing. An inline value such as `Owner:: [[Jane Doe]]` keeps its native outline. Its child attributes can form their own rows.
+- `roam/meta::`, pages marked as pass-through attributes in Roam’s Attribute Settings (`:attr/proxy true`), and any names listed under **Pass-through attributes** in Settings stay collapsible headers, even with an annotation after `::`. Their child attributes use the enclosing column depth.
 - Attribute rows work at any outline depth, including beneath ordinary child blocks. A label such as `Version History::` stays in its column while you edit it.
 - The top-level label column starts at `18rem`. Nested label widths scale with the space available. Drag a divider to resize all rows at its nesting depth. Double-click it to reset that depth, or press Escape during a drag to cancel.
 - Keeps multiple child blocks stacked vertically on the right.
@@ -70,6 +72,7 @@ The extension adds a `Roam Attribute Columns` settings panel:
 - Enable horizontal attributes
 - Label column width (top-level rows)
 - Reset column widths (restores all depths)
+- Pass-through attributes (comma-separated header names, layered on top of `roam/meta` and `:attr/proxy`)
 - Show row dividers
 
 It also adds this command palette command:
@@ -88,6 +91,10 @@ Roam Attribute Columns adds these classes alongside Roam's original classes.
 - `rc-column-resizer`
 
 Each row has a `data-rc-depth` attribute. Outermost attribute rows have depth `0`, and each enclosing attribute row adds one level.
+
+When Roam provides a derived relationship (a *harc*) through `:harc/_a-source`, the extension reads its value sources to determine whether the value comes from the attribute block itself. Graphs without harcs use the rendered label or active editor. Layout reads leave Roam’s derived relationships and page settings intact. [Roam’s Attributes Data Model](https://roamdocs.fyi/developer-documentation/attributes-data-model-new.md)
+
+Harc-backed rows expose `data-rc-attr-model="harc"` and `data-rc-harc-uid`. A row describing another relationship also has `data-rc-attr-role="relationship"`. Pass-through headers have `data-rc-passthrough="true"`.
 
 Themes can keep styling normal Roam classes like `.rm-block-text`, `.rm-block-children`, `.rm-multibar`, and `.roam-block-container`. Folded count placeholders are inserted with those normal Roam classes, so themes do not need extension-specific selectors for typography, color, bullets, or outline bars. The stylesheet uses `:where(...)` selectors and targets each row’s native label and child container directly.
 

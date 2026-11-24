@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-23
+
+- Display attribute columns at any nesting depth and keep labels aligned while editing.
+- Reclaim unused label space and wrap text at word boundaries across the full column width.
+- Drag dividers to save a width for each attribute nesting depth. Double-click to reset that depth, or use **Reset column widths** in Settings to restore all defaults.
+
 ## 2026-05-16
 
 - Initial public release as Roam Attribute Columns.

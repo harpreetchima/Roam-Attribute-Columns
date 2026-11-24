@@ -5,11 +5,16 @@ const FALLBACK_SUMMARY = "Folded blocks";
 const FOLDED_SUMMARY_BLOCK_ATTRIBUTE = "data-rc-folded-summary-block";
 const TRAILING_BODY_BLOCK_ATTRIBUTE = "data-rc-trailing-body-block";
 const TRAILING_BODY_PENDING_ATTRIBUTE = "data-rc-trailing-body-pending";
+const RESIZER_ATTRIBUTE = "data-rc-resizer";
+const INJECTED_SELECTOR =
+  `[${FOLDED_SUMMARY_BLOCK_ATTRIBUTE}], [${TRAILING_BODY_BLOCK_ATTRIBUTE}], [${RESIZER_ATTRIBUTE}]`;
+const EDITOR_SELECTOR = "textarea:is(.rm-block-input, .rm-block__input)";
 const HORIZONTAL_LAYOUT_MEDIA_QUERY = "(min-width: 900px)";
 
 const SETTINGS_KEYS = {
   enabled: "enabled",
   labelWidth: "labelWidth",
+  nestedLabelWidths: "nestedLabelWidths",
   rowDividers: "rowDividers",
 };
 
@@ -27,6 +32,7 @@ const CLASSES = {
   summaryPending: "rc-attribute-row--summary-pending",
   label: "rc-attribute-label",
   values: "rc-attribute-values",
+  resizing: "rc-attribute-columns-resizing",
   trailingBodyBlock: "rc-trailing-body-block",
 };
 
@@ -42,13 +48,20 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   let commandPaletteApi = null;
   let unloaded = false;
   let creatingTrailingBodyBlock = false;
-  let resizeListenerAttached = false;
+  const layoutListeners = new AbortController();
+  let drag = null;
+  let suppressDividerClick = false;
+  let focusTimer = null;
+  let finishFocusWait = null;
 
   let settings = {
     ...DEFAULTS,
   };
 
   const summaryCache = new Map();
+  const markedRows = new Set();
+  const appliedNestedDepths = new Set();
+  const savingSettings = new Map();
   const summaryWatches = new Map();
   const pendingSummaryWatches = new Set();
   const activeClosedRowUids = new Set();
@@ -77,8 +90,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     if (!childrenContainer?.children) return [];
     return Array.from(childrenContainer.children).filter((child) =>
       child.matches?.(".roam-block-container") &&
-      !child.hasAttribute?.(FOLDED_SUMMARY_BLOCK_ATTRIBUTE) &&
-      !child.hasAttribute?.(TRAILING_BODY_BLOCK_ATTRIBUTE)
+      !child.matches(INJECTED_SELECTOR)
     );
   }
 
@@ -118,7 +130,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     if (!childrenContainer) return 0;
 
     return Array.from(childrenContainer.querySelectorAll(".roam-block-container")).filter(
-      (block) => !block.hasAttribute?.(FOLDED_SUMMARY_BLOCK_ATTRIBUTE)
+      (block) => !block.closest(INJECTED_SELECTOR)
     ).length;
   }
 
@@ -137,6 +149,10 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   function buildApiRowSummary(blockData) {
+    // Roam can omit :block/children entirely for an existing leaf.
+    if (getKeywordValue(blockData, ":block/uid") && !getKeywordValue(blockData, ":block/children")) {
+      return buildSummaryFromCount(0);
+    }
     const count = countPulledDescendants(blockData);
     if (!Number.isFinite(count)) return null;
     return buildSummaryFromCount(count);
@@ -224,7 +240,6 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
   function removeAllClosedRowWatches() {
     activeClosedRowUids.clear();
-    pendingSummaryWatches.clear();
     summaryWatches.forEach((watch) => {
       removePullWatchEntity(watch.entity, watch.callback);
     });
@@ -246,7 +261,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
     const entity = pullWatchEntity(uid);
     const callback = (_before, after) => {
-      if (unloaded) return;
+      if (unloaded || !activeClosedRowUids.has(uid)) return;
 
       const summary = buildApiRowSummary(after);
       if (summary?.hasChildren) {
@@ -312,6 +327,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   function getSetting(key) {
+    if (savingSettings.has(key)) return savingSettings.get(key).value;
     try {
       return extensionAPI?.settings?.get?.(key);
     } catch (error) {
@@ -321,15 +337,22 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   async function setSetting(key, value) {
+    // Keep rapid consecutive drags (and resets) ordered until Roam saves them.
+    const previous = savingSettings.get(key);
+    const write = async () => extensionAPI?.settings?.set?.(key, value);
+    const promise = previous ? previous.promise.catch(() => {}).then(write) : write();
+    savingSettings.set(key, { value, promise });
     try {
-      const result = extensionAPI?.settings?.set?.(key, value);
-      if (result && typeof result.then === "function") await result;
+      await promise;
     } catch (error) {
       warn(`Could not save setting "${key}".`, error);
+    } finally {
+      if (savingSettings.get(key)?.promise === promise) savingSettings.delete(key);
     }
   }
 
   async function setSettingDefault(key, value) {
+    if (unloaded) return;
     const existing = getSetting(key);
     if (existing === null || typeof existing === "undefined") {
       await setSetting(key, value);
@@ -347,11 +370,14 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   function normalizeCssLength(value, fallback) {
-    const candidate = String(value || "").trim();
+    const candidate = typeof value === "string" ? value.trim() : "";
     if (!candidate) return fallback;
 
     try {
-      if (typeof CSS !== "undefined" && CSS.supports?.("width", candidate)) {
+      if (
+        typeof CSS !== "undefined" && CSS.supports?.("width", candidate) &&
+        CSS.supports("width", `clamp(0px, ${candidate}, 100%)`)
+      ) {
         return candidate;
       }
     } catch (_) {}
@@ -360,7 +386,16 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   function readSettings() {
+    const savedWidths = getSetting(SETTINGS_KEYS.nestedLabelWidths);
+    const nestedLabelWidths = {};
+    if (savedWidths && typeof savedWidths === "object" && !Array.isArray(savedWidths)) {
+      for (const [depth, width] of Object.entries(savedWidths)) {
+        const length = normalizeCssLength(width, null);
+        if (/^[1-9]\d*$/.test(depth) && length) nestedLabelWidths[depth] = length;
+      }
+    }
     settings = {
+      nestedLabelWidths,
       enabled: normalizeBoolean(getSetting(SETTINGS_KEYS.enabled), DEFAULTS.enabled),
       labelWidth: normalizeCssLength(getSetting(SETTINGS_KEYS.labelWidth), DEFAULTS.labelWidth),
       rowDividers: normalizeBoolean(getSetting(SETTINGS_KEYS.rowDividers), DEFAULTS.rowDividers),
@@ -384,6 +419,8 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   async function updateSetting(key, rawValue) {
+    if (unloaded) return;
+    finishDrag(false);
     let nextValue = rawValue;
     if (key === SETTINGS_KEYS.enabled || key === SETTINGS_KEYS.rowDividers) {
       nextValue = normalizeBoolean(rawValue, DEFAULTS[key]);
@@ -393,9 +430,11 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     }
 
     settings[key] = nextValue;
-    await setSetting(key, nextValue);
+    const saved = setSetting(key, nextValue);
     applyDocumentSettings();
+    if (!settings.enabled) clearRowMarks();
     scheduleRefresh();
+    await saved;
   }
 
   async function toggleEnabled() {
@@ -410,11 +449,19 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     if (!root || !body) return;
 
     root.style.setProperty(CSS_VARS.labelWidthSetting, settings.labelWidth);
+    for (const depth of appliedNestedDepths) {
+      if (!(depth in settings.nestedLabelWidths)) {
+        root.style.removeProperty(widthProperty(depth));
+        appliedNestedDepths.delete(depth);
+      }
+    }
+    for (const [depth, width] of Object.entries(settings.nestedLabelWidths)) {
+      root.style.setProperty(widthProperty(depth), width);
+      appliedNestedDepths.add(depth);
+    }
 
     body.classList.toggle(CLASSES.enabled, settings.enabled);
     body.classList.toggle(CLASSES.rowDividers, settings.enabled && settings.rowDividers);
-
-    if (!settings.enabled) clearRowMarks();
   }
 
   function clearDocumentSettings() {
@@ -422,28 +469,39 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
     document.body?.classList.remove(CLASSES.enabled, CLASSES.rowDividers);
     document.documentElement?.style.removeProperty(CSS_VARS.labelWidthSetting);
+    appliedNestedDepths.forEach((depth) => {
+      document.documentElement.style.removeProperty(widthProperty(depth));
+    });
+    appliedNestedDepths.clear();
+  }
+
+  function findBlockEditor(main) {
+    const editor = main?.querySelector?.(EDITOR_SELECTOR);
+    return editor && editor.closest?.(".rm-block-main") === main ? editor : null;
   }
 
   function getAttributeRowDescriptor(block) {
     if (!block?.matches?.(".roam-block-container")) return { eligible: false };
-    if (
-      block.hasAttribute?.(FOLDED_SUMMARY_BLOCK_ATTRIBUTE) ||
-      block.hasAttribute?.(TRAILING_BODY_BLOCK_ATTRIBUTE)
-    ) {
+    if (block.closest(INJECTED_SELECTOR)) {
       return { eligible: false };
     }
 
-    const main = directChildMatching(block, ".rm-block-main");
-    const children = directChildMatching(block, ".rm-block-children");
+    const { label: main, values: children } = getRowParts(block);
     if (!main || !children) return { eligible: false };
 
-    const blockText = directChildMatching(main, ".rm-block-text");
-    const attrRef = blockText?.querySelector?.(".rm-attr-ref");
-    if (!blockText || !attrRef) return { eligible: false };
-
-    const parentText = visibleText(blockText);
-    const attrText = visibleText(attrRef);
-    if (!attrText || parentText !== attrText) return { eligible: false };
+    const editor = findBlockEditor(main);
+    if (editor) {
+      const text = editor.value;
+      const delimiter = text.indexOf("::");
+      if (
+        /[\r\n]/.test(text) || delimiter < 1 ||
+        !text.slice(0, delimiter).trim() || text.slice(delimiter + 2).trim()
+      ) return { eligible: false };
+    } else {
+      const blockText = directChildMatching(main, ".rm-block-text");
+      const attrText = visibleText(blockText?.querySelector(".rm-attr-ref"));
+      if (!attrText || visibleText(blockText) !== attrText) return { eligible: false };
+    }
 
     const uid = getBlockUid(block);
     const closed = block.classList.contains("rm-block--closed");
@@ -479,22 +537,9 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   function collectMainWindowBlocks() {
     if (typeof document === "undefined") return [];
 
-    const roots = Array.from(
-      document.querySelectorAll(".roam-main .roam-body-main .roam-article")
+    return document.querySelectorAll(
+      ".roam-main .roam-body-main .roam-article .roam-block-container"
     );
-    const seen = new Set();
-    const blocks = [];
-
-    roots.forEach((root) => {
-      root.querySelectorAll(".roam-block-container").forEach((block) => {
-        if (!seen.has(block)) {
-          seen.add(block);
-          blocks.push(block);
-        }
-      });
-    });
-
-    return blocks;
   }
 
   function getRowParts(row) {
@@ -603,7 +648,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
   function setFoldedSummaryBlockText(block, text) {
     const textElement = block?.querySelector?.(".rm-block-text > span");
-    textElement?.classList.add("rm-page-ref--tag");
+    textElement?.classList.toggle("rm-page-ref--tag", true);
     if (textElement && textElement.textContent !== text) {
       textElement.textContent = text;
     }
@@ -650,13 +695,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   function directTopLevelBlocks(container) {
-    if (!container?.children) return [];
-
-    return Array.from(container.children).filter(
-      (child) =>
-        child.matches?.(".roam-block-container") &&
-        !child.hasAttribute?.(TRAILING_BODY_BLOCK_ATTRIBUTE)
-    );
+    return directChildBlocks(container);
   }
 
   function shouldShowTrailingBodyBlock(container) {
@@ -788,18 +827,16 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     return typeof generate === "function" ? generate() : "";
   }
 
-  function delay(ms) {
-    return new Promise((resolve) => {
-      window.setTimeout(resolve, ms);
-    });
-  }
-
   async function waitForBlockToRender(uid) {
     if (!uid || typeof document === "undefined") return;
 
-    for (let attempt = 0; attempt < 10; attempt += 1) {
+    for (let attempt = 0; !unloaded && attempt < 10; attempt += 1) {
       if (document.querySelector(`[data-block-uid="${uid}"]`)) return;
-      await delay(40);
+      await new Promise((resolve) => {
+        finishFocusWait = resolve;
+        focusTimer = window.setTimeout(resolve, 40);
+      });
+      finishFocusWait = focusTimer = null;
     }
   }
 
@@ -809,6 +846,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     if (!uid || typeof focus !== "function") return;
 
     await waitForBlockToRender(uid);
+    if (unloaded) return;
 
     try {
       await focus.call(uiApi, {
@@ -860,6 +898,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
     try {
       const parentUid = await getTrailingBodyParentUid(block);
+      if (unloaded) return;
       removeTrailingBodyBlocks();
       const uid = await createTrailingBodyBlockInGraph(parentUid);
       await focusBlock(uid);
@@ -885,6 +924,144 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     void activateTrailingBodyBlock(event.currentTarget);
   }
 
+  function widthProperty(depth) {
+    return Number(depth) === 0 ? CSS_VARS.labelWidthSetting : `--rc-label-width-depth-${depth}`;
+  }
+
+  function saveWidth(depth, width) {
+    if (depth === 0) return updateSetting(SETTINGS_KEYS.labelWidth, width || DEFAULTS.labelWidth);
+
+    const widths = { ...settings.nestedLabelWidths };
+    if (width) widths[depth] = width;
+    else delete widths[depth];
+    return updateSetting(SETTINGS_KEYS.nestedLabelWidths, widths);
+  }
+
+  function ensureResizer(row) {
+    if (directChildMatching(row, `[${RESIZER_ATTRIBUTE}]`)) return;
+    const handle = document.createElement("div");
+    handle.className = "rc-column-resizer";
+    handle.setAttribute(RESIZER_ATTRIBUTE, "");
+    handle.setAttribute("role", "separator");
+    handle.setAttribute("aria-label", "Resize attribute label column");
+    handle.setAttribute("aria-orientation", "vertical");
+    handle.title = "Drag to resize. Double-click to reset this level.";
+    row.append(handle);
+  }
+
+  function stopEvent(event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function finishDrag(commit) {
+    if (!drag) return;
+    const { handle, pointerId, listeners, depth, width, previous } = drag;
+    drag = null;
+    suppressDividerClick = true;
+    listeners.abort();
+    if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+    handle.removeAttribute("data-rc-dragging");
+    document.body.classList.remove(CLASSES.resizing);
+
+    const root = document.documentElement.style;
+    if (previous) root.setProperty(widthProperty(depth), previous);
+    else root.removeProperty(widthProperty(depth));
+    if (commit && width !== null) void saveWidth(depth, width);
+    scheduleRefresh();
+  }
+
+  function moveDrag(event) {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    stopEvent(event);
+    const delta = (event.clientX - drag.startX) * drag.direction;
+    const pixels = Math.round(Math.min(drag.max, Math.max(drag.min, drag.startWidth + delta)));
+    drag.width = delta === 0 ? null : `${pixels}px`;
+    document.documentElement.style.setProperty(widthProperty(drag.depth), drag.width || drag.previous);
+  }
+
+  function beginDrag(event, handle) {
+    if (drag || event.button !== 0 || event.isPrimary === false) return;
+    const row = handle.parentElement;
+    const { label, values } = getRowParts(row);
+    if (!label || !values) return;
+
+    const style = getComputedStyle(row);
+    const rtl = style.direction === "rtl";
+    const labelRect = label.getBoundingClientRect();
+    const valueRect = values.getBoundingClientRect();
+    const gap = rtl ? labelRect.left - valueRect.right : valueRect.left - labelRect.right;
+    const horizontalPadding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    const horizontalBorder = parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
+    const rowWidth = row.getBoundingClientRect().width - horizontalPadding - horizontalBorder;
+    if (rowWidth <= 0 || labelRect.width <= 0) return;
+
+    // Match the grid's responsive bounds even inside a narrow nested value.
+    const available = Math.max(0, rowWidth - Math.max(0, gap));
+    const depth = Number(row.dataset.rcDepth);
+    const listeners = new AbortController();
+    drag = {
+      handle,
+      depth,
+      listeners,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      direction: rtl ? -1 : 1,
+      startWidth: labelRect.width,
+      min: Math.min(80, available * 0.35),
+      max: available - Math.min(150, available * 0.5),
+      previous: document.documentElement.style.getPropertyValue(widthProperty(depth)),
+      width: null,
+    };
+
+    window.clearTimeout(refreshTimeout);
+    refreshTimeout = null;
+    document.body.classList.add(CLASSES.resizing);
+    handle.setAttribute("data-rc-dragging", "");
+    const options = { capture: true, signal: listeners.signal };
+    window.addEventListener("pointermove", moveDrag, options);
+    window.addEventListener("pointerup", (up) => {
+      if (up.pointerId !== drag.pointerId) return;
+      moveDrag(up);
+      finishDrag(handle.isConnected);
+    }, options);
+    const cancelPointer = (end) => {
+      if (end.pointerId === drag.pointerId) finishDrag(false);
+    };
+    window.addEventListener("pointercancel", cancelPointer, options);
+    handle.addEventListener("lostpointercapture", cancelPointer, options);
+    window.addEventListener("blur", () => finishDrag(false), options);
+    window.addEventListener("keydown", (key) => {
+      if (key.key !== "Escape") return;
+      stopEvent(key);
+      finishDrag(false);
+    }, options);
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch (_) {
+      // Window listeners also track the gesture when capture is unavailable.
+    }
+  }
+
+  function handleDividerEvent(event) {
+    if (event.type === "pointerdown") suppressDividerClick = false;
+    // Without capture, a release outside the divider can dispatch click on its ancestor.
+    if (event.type === "click" && suppressDividerClick && event.detail > 0) {
+      suppressDividerClick = false;
+      stopEvent(event);
+      return;
+    }
+    const handle = event.target.closest?.(`.${CLASSES.row} > [${RESIZER_ATTRIBUTE}]`);
+    if (!handle || !settings.enabled || !isHorizontalLayoutActive()) return;
+    stopEvent(event);
+    if (event.type === "pointerdown") beginDrag(event, handle);
+    if (event.type === "dblclick") void saveWidth(Number(handle.parentElement.dataset.rcDepth), null);
+  }
+
+  function handleEditorInput(event) {
+    if (event.target.matches?.(EDITOR_SELECTOR)) scheduleRefresh();
+  }
+
   function clearRowData(row) {
     ROW_DATA_ATTRIBUTES.forEach((attribute) => row.removeAttribute(attribute));
   }
@@ -899,24 +1076,29 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     row.setAttribute("data-rc-child-count", String(summary.childCount ?? ""));
   }
 
-  function markRow(row, descriptor) {
+  function markRow(row, descriptor, depth) {
     const parts = getRowParts(row);
-    const uid = getBlockUid(row);
-    row.classList.add(CLASSES.row);
-    row.classList.toggle(CLASSES.closed, Boolean(descriptor?.closed));
-    row.classList.toggle(CLASSES.summaryPending, Boolean(descriptor?.summary?.pending));
-    parts.label?.classList.add(CLASSES.label);
-    parts.values?.classList.add(CLASSES.values);
+    markedRows.add(row);
+    row.classList.toggle(CLASSES.row, true);
+    row.classList.toggle(CLASSES.closed, descriptor.closed);
+    row.classList.toggle(CLASSES.summaryPending, Boolean(descriptor.summary?.pending));
+    parts.label.classList.toggle(CLASSES.label, true);
+    parts.values.classList.toggle(CLASSES.values, true);
+    if (row.dataset.rcDepth !== String(depth)) row.dataset.rcDepth = String(depth);
+    if (depth) {
+      row.style.setProperty(
+        "--rc-row-label-width",
+        `var(${widthProperty(depth)}, min(var(--rc-label-width), 38%))`
+      );
+    } else {
+      row.style.removeProperty("--rc-row-label-width");
+    }
+    ensureResizer(row);
 
-    if (descriptor?.closed) {
-      if (uid) {
-        activeClosedRowUids.add(uid);
-        void ensureClosedRowWatch(uid);
-      }
+    if (descriptor.closed) {
       applyRowSummary(row, descriptor.summary);
       ensureFoldedSummaryBlock(parts.values, descriptor.summary);
     } else {
-      if (uid) removeClosedRowWatch(uid);
       clearRowData(row);
       removeFoldedSummaryBlock(parts.values);
     }
@@ -924,132 +1106,127 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
   function unmarkRow(row) {
     const parts = getRowParts(row);
-    const uid = getBlockUid(row);
-    if (uid) removeClosedRowWatch(uid);
+    markedRows.delete(row);
     row.classList.remove(CLASSES.row, CLASSES.closed, CLASSES.summaryPending);
     clearRowData(row);
+    delete row.dataset.rcDepth;
+    row.style.removeProperty("--rc-row-label-width");
+    directChildMatching(row, `[${RESIZER_ATTRIBUTE}]`)?.remove();
     removeFoldedSummaryBlock(parts.values);
     parts.label?.classList.remove(CLASSES.label);
     parts.values?.classList.remove(CLASSES.values);
   }
 
   function clearStrayPartMarks() {
-    document
-      .querySelectorAll(`.${CLASSES.label}, .${CLASSES.values}`)
-      .forEach((element) => {
-        if (!element.closest?.(`.${CLASSES.row}`)) {
-          element.classList.remove(CLASSES.label, CLASSES.values);
-        }
-      });
+    document.querySelectorAll(`.${CLASSES.label}, .${CLASSES.values}`).forEach((element) => {
+      if (!element.parentElement?.classList.contains(CLASSES.row)) {
+        element.classList.remove(CLASSES.label, CLASSES.values);
+      }
+    });
     document.querySelectorAll(`[${FOLDED_SUMMARY_BLOCK_ATTRIBUTE}]`).forEach((element) => {
-      if (!element.closest?.(`.${CLASSES.row}`)) element.remove();
+      if (!element.parentElement?.matches(`.${CLASSES.row}.${CLASSES.closed} > .rm-block-children`)) {
+        element.remove();
+      }
+    });
+    document.querySelectorAll(`[${RESIZER_ATTRIBUTE}]`).forEach((handle) => {
+      if (!handle.parentElement?.classList.contains(CLASSES.row)) handle.remove();
     });
   }
 
   function refreshRows() {
     refreshTimeout = null;
-    if (unloaded) return;
-
+    if (unloaded || drag) return;
     readSettings();
     applyDocumentSettings();
-
     if (!settings.enabled) {
       clearRowMarks();
       return;
     }
 
-    const blocks = collectMainWindowBlocks();
-    const eligibilityCache = new WeakMap();
-    const candidateRows = new Map();
-
-    const getDescriptorCached = (block) => {
-      if (!eligibilityCache.has(block)) {
-        eligibilityCache.set(block, getAttributeRowDescriptor(block));
-      }
-      return eligibilityCache.get(block);
-    };
-
-    const isEligibleCached = (block) => Boolean(getDescriptorCached(block).eligible);
-
-    const hasEligibleAttributeAncestor = (block) => {
-      let ancestor = block.parentElement?.closest?.(".roam-block-container");
-      while (ancestor) {
-        if (isEligibleCached(ancestor)) return true;
-        ancestor = ancestor.parentElement?.closest?.(".roam-block-container");
-      }
-      return false;
-    };
-
-    blocks.forEach((block) => {
-      const descriptor = getDescriptorCached(block);
-      if (descriptor.eligible && !hasEligibleAttributeAncestor(block)) {
-        candidateRows.set(block, descriptor);
-      }
+    const candidates = new Map();
+    const childDepths = new WeakMap();
+    activeClosedRowUids.clear();
+    // querySelectorAll visits parents first. Ordinary blocks pass the depth through.
+    for (const block of collectMainWindowBlocks()) {
+      const parent = block.parentElement?.closest(".roam-block-container");
+      const depth = childDepths.get(parent) || 0;
+      const descriptor = getAttributeRowDescriptor(block);
+      childDepths.set(block, depth + Number(descriptor.eligible));
+      if (!descriptor.eligible) continue;
+      candidates.set(block, { descriptor, depth });
+      if (descriptor.closed) activeClosedRowUids.add(getBlockUid(block));
+    }
+    markedRows.forEach((row) => {
+      if (!candidates.has(row)) unmarkRow(row);
     });
-
-    document.querySelectorAll(`.${CLASSES.row}`).forEach((row) => {
-      if (!candidateRows.has(row)) unmarkRow(row);
+    candidates.forEach(({ descriptor, depth }, row) => markRow(row, descriptor, depth));
+    summaryWatches.forEach((_, uid) => {
+      if (!activeClosedRowUids.has(uid)) removeClosedRowWatch(uid);
     });
-
-    candidateRows.forEach((descriptor, row) => {
-      markRow(row, descriptor);
-    });
-
+    activeClosedRowUids.forEach((uid) => void ensureClosedRowWatch(uid));
     clearStrayPartMarks();
     syncTrailingBodyBlocks();
   }
 
   function scheduleRefresh() {
-    if (unloaded || refreshTimeout !== null) return;
+    if (unloaded || drag || refreshTimeout !== null) return;
     refreshTimeout = window.setTimeout(refreshRows, 80);
   }
 
   function clearRowMarks() {
     if (typeof document === "undefined") return;
-    document.querySelectorAll(`.${CLASSES.row}`).forEach((row) => {
-      unmarkRow(row);
-    });
-    document
-      .querySelectorAll(`.${CLASSES.label}, .${CLASSES.values}`)
-      .forEach((element) => {
-        element.classList.remove(CLASSES.label, CLASSES.values);
-      });
-    document.querySelectorAll(`[${FOLDED_SUMMARY_BLOCK_ATTRIBUTE}]`).forEach((element) => {
-      element.remove();
-    });
+    markedRows.forEach(unmarkRow);
+    document.querySelectorAll(`.${CLASSES.row}, [data-rc-depth]`).forEach(unmarkRow);
+    clearStrayPartMarks();
     removeTrailingBodyBlocks();
+    removeAllClosedRowWatches();
   }
 
   function handleResize() {
+    if (drag && !isHorizontalLayoutActive()) finishDrag(false);
     scheduleRefresh();
   }
 
-  function startResizeListener() {
-    if (typeof window === "undefined" || resizeListenerAttached) return;
-    window.addEventListener("resize", handleResize);
-    resizeListenerAttached = true;
-  }
-
-  function stopResizeListener() {
-    if (typeof window === "undefined" || !resizeListenerAttached) return;
-    window.removeEventListener("resize", handleResize);
-    resizeListenerAttached = false;
+  function startLayoutListeners() {
+    const options = { capture: true, signal: layoutListeners.signal };
+    window.addEventListener("resize", handleResize, { signal: layoutListeners.signal });
+    for (const event of ["pointerdown", "mousedown", "click", "dblclick"]) {
+      document.addEventListener(event, handleDividerEvent, options);
+    }
+    document.addEventListener("input", handleEditorInput, options);
   }
 
   function startObserver() {
     if (typeof MutationObserver === "undefined" || typeof document === "undefined") return;
 
-    const target = document.querySelector(".roam-main") || document.body;
+    // The main window can itself be replaced during navigation.
+    const target = document.body;
     if (!target) return;
 
-    mutationObserver = new MutationObserver(() => {
-      scheduleRefresh();
+    mutationObserver = new MutationObserver((records) => {
+      if (drag && !drag.handle.isConnected) finishDrag(false);
+      if (drag) return;
+      const changed = records.some((record) => {
+        const element = record.target.nodeType === Node.ELEMENT_NODE
+          ? record.target : record.target.parentElement;
+        if (element?.closest(INJECTED_SELECTOR)) return false;
+        if (!element?.closest(".roam-main")) {
+          if (record.type !== "childList") return false;
+          return [...record.addedNodes, ...record.removedNodes].some((node) =>
+            node.matches?.(".roam-main") || node.querySelector?.(".roam-main")
+          );
+        }
+        if (record.type !== "childList" || record.removedNodes.length) return true;
+        return Array.from(record.addedNodes).some((node) => !node.matches?.(INJECTED_SELECTOR));
+      });
+      if (changed) scheduleRefresh();
     });
 
     mutationObserver.observe(target, {
       childList: true,
       subtree: true,
       attributes: true,
+      characterData: true,
       attributeFilter: ["class", "data-block-uid", "data-page-links"],
     });
   }
@@ -1078,7 +1255,8 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
         {
           id: SETTINGS_KEYS.labelWidth,
           name: "Label column width",
-          description: "CSS width for the left property column. Default: 18rem.",
+          description: "Top-level label width (default 18rem). Drag a divider to resize its level, " +
+            "or double-click to reset it.",
           action: {
             type: "input",
             placeholder: DEFAULTS.labelWidth,
@@ -1088,6 +1266,19 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
                 readInputValue(eventOrValue, settings.labelWidth)
               );
             },
+          },
+        },
+        {
+          id: "resetColumnWidths",
+          name: "Reset column widths",
+          description: "Restore the top-level width and all nested widths.",
+          action: {
+            type: "button",
+            content: "Reset column widths",
+            onClick: () => Promise.all([
+              saveWidth(0, null),
+              updateSetting(SETTINGS_KEYS.nestedLabelWidths, {}),
+            ]),
           },
         },
         {
@@ -1161,13 +1352,16 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     await setSettingDefault(SETTINGS_KEYS.labelWidth, DEFAULTS.labelWidth);
     await setSettingDefault(SETTINGS_KEYS.rowDividers, DEFAULTS.rowDividers);
 
+    if (unloaded) return;
     readSettings();
     await createSettingsPanel();
+    if (unloaded) return;
     await registerCommand();
+    if (unloaded) return;
 
     applyDocumentSettings();
     startObserver();
-    startResizeListener();
+    startLayoutListeners();
     scheduleRefresh();
 
     console.log("[Roam Attribute Columns] Loaded.");
@@ -1175,6 +1369,9 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
   function unload() {
     unloaded = true;
+    finishDrag(false);
+    window.clearTimeout(focusTimer);
+    finishFocusWait?.();
 
     if (refreshTimeout !== null) {
       window.clearTimeout(refreshTimeout);
@@ -1186,11 +1383,10 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
       mutationObserver = null;
     }
 
-    stopResizeListener();
+    layoutListeners.abort();
     removeCommand();
     clearRowMarks();
     clearDocumentSettings();
-    removeAllClosedRowWatches();
     summaryCache.clear();
 
     console.log("[Roam Attribute Columns] Unloaded.");

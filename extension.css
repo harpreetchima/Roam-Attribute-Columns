@@ -1,6 +1,6 @@
 :where(:root) {
   --rc-label-width: var(--rc-label-width-setting, 18rem);
-  --rc-column-gap: var(--rm-block-spacing, 1.5rem);
+  --rc-column-gap: 0.75rem;
   --rc-row-padding-block: 6px;
   --rc-row-padding-inline: 0px;
   --rc-row-border-color: var(
@@ -16,104 +16,139 @@
   );
 }
 
+:where(.rc-column-resizer) {
+  display: none;
+}
+
+:where(body.rc-attribute-columns-resizing, body.rc-attribute-columns-resizing *) {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 @media screen and (min-width: 900px) {
-  :where(
-      body.roam-attribute-columns-enabled
-        .roam-main
-        .roam-body-main
-        .roam-article
-        .roam-block-container.rc-attribute-row
-    ) {
+  :where(.roam-attribute-columns-enabled .roam-article .rc-attribute-row) {
+    --rc-row-label-width: var(--rc-label-width);
+    --rc-used-gap: min(var(--rc-column-gap), 10%);
+    --rc-available: calc(100% - var(--rc-used-gap));
+    /* Reserve 150px for values where possible. Both minima scale down in tight grids. */
+    --rc-min-label: min(80px, var(--rc-available) * 0.35);
+    --rc-max-label: calc(var(--rc-available) - min(150px, var(--rc-available) * 0.5));
     display: grid !important;
-    grid-template-columns: minmax(0, var(--rc-label-width)) minmax(0, 1fr);
-    column-gap: var(--rc-column-gap);
+    grid-template-columns:
+      minmax(0, clamp(var(--rc-min-label), var(--rc-row-label-width), var(--rc-max-label)))
+      minmax(0, 1fr);
+    column-gap: var(--rc-used-gap);
     align-items: start;
     box-sizing: border-box;
+    min-width: 0;
     width: 100%;
     max-width: 100%;
     padding-block: var(--rc-row-padding-block);
     padding-inline: var(--rc-row-padding-inline);
   }
 
-  :where(
-      body.roam-attribute-columns-enabled.roam-attribute-columns-row-dividers
-        .roam-main
-        .roam-body-main
-        .roam-article
-        .roam-block-container.rc-attribute-row
-    ) {
+  :where(.roam-attribute-columns-row-dividers .roam-article .rc-attribute-row) {
     border-top: 1px solid var(--rc-row-border-color);
   }
 
-  :where(
-      body.roam-attribute-columns-enabled
-        .roam-main
-        .roam-body-main
-        .roam-article
-        .roam-block-container.rc-attribute-row
-        > .rm-block-main
-    ) {
+  :where(.roam-attribute-columns-enabled .rc-attribute-row > .rm-block-main) {
     grid-column: 1;
+    grid-row: 1;
+    display: flex;
+    align-items: flex-start;
+    box-sizing: border-box;
     min-width: 0;
     max-width: 100%;
     width: 100%;
-    align-self: start;
+    padding-inline-end: 6px;
+  }
+
+  :where(.rc-attribute-row > .rm-block-main > :is(.controls, .rm-block__controls, .rm-block__ref-count)) {
+    flex: 0 0 auto;
+  }
+
+  /* Only the native click spacer is expendable. Keep reference counters and controls. */
+  :where(.rc-attribute-row > .rm-block-main > .rm-block-separator),
+  :where(.rc-attribute-row > .rm-block-main > .rm-block-separator + div[style*="min-width"]:empty:not(
+    [class], [role], [tabindex], [contenteditable], [onclick], [aria-label]
+  )) {
+    display: none !important;
   }
 
   :where(
-      body.roam-attribute-columns-enabled
-        .roam-main
-        .roam-body-main
-        .roam-article
-        .roam-block-container.rc-attribute-row
-        > .rm-block-main
-        > .rm-block-text
+      .rc-attribute-row > .rm-block-main > .rm-block-text,
+      .rc-attribute-row > .rm-block-main > .rm-block__input,
+      .rc-attribute-row > .rm-block-main > textarea.rm-block-input,
+      .rc-attribute-row > .rm-block-main > div:has(> textarea.rm-block-input),
+      .rc-attribute-row > .rm-block-main > div:has(> textarea.rm-block__input)
     ) {
-    min-width: 0;
-    max-width: 100%;
-    width: auto !important;
+    flex: 1 1 0% !important;
+    box-sizing: border-box;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    margin-right: 0 !important;
+    padding-inline-end: 2px;
     white-space: normal !important;
-    overflow-wrap: anywhere;
+    word-break: normal !important;
+    overflow-wrap: break-word !important;
   }
 
-  :where(
-      body.roam-attribute-columns-enabled
-        .roam-main
-        .roam-body-main
-        .roam-article
-        .roam-block-container.rc-attribute-row
-        > .rm-block-children
-    ) {
+  :where(.rc-attribute-row > .rm-block-main textarea:is(.rm-block-input, .rm-block__input)) {
+    box-sizing: border-box;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+
+  :where(.rc-attribute-row > .rm-block-children) {
     grid-column: 2;
+    grid-row: 1;
+    box-sizing: border-box;
     min-width: 0;
     max-width: 100% !important;
     width: 100% !important;
     margin-left: 0 !important;
     padding-left: 0 !important;
-    align-self: start;
   }
 
-  :where(
-      body.roam-attribute-columns-enabled
-        .roam-main
-        .roam-body-main
-        .roam-article
-        .roam-block-container.rc-attribute-row
-        > .rm-block-children
-        > .roam-block-container
-    ) {
+  :where(.rc-attribute-row :is(.roam-block-container, .rm-block-main, .rm-block-children, .rm-block__input)) {
+    min-width: 0;
+  }
+
+  :where(.rc-attribute-row > .rm-block-children > .roam-block-container) {
+    box-sizing: border-box;
     max-width: 100% !important;
     width: 100% !important;
   }
 
-  :where(
-      body.roam-attribute-columns-enabled
-        .roam-main
-        .roam-body-main
-        .roam-article
-        .roam-block-container.rc-attribute-row
-        .rm-block-text
-    ) {
-    overflow-wrap: anywhere;
+  :where(.rc-attribute-row .rm-block-text) {
+    overflow-wrap: break-word;
+  }
+
+  :where(.rc-attribute-row > .rc-column-resizer) {
+    grid-column: 1;
+    grid-row: 1;
+    justify-self: end;
+    align-self: stretch;
+    position: relative;
+    z-index: 1;
+    display: block;
+    width: 12px;
+    margin-inline-end: -6px;
+    cursor: col-resize;
+    touch-action: none;
+    user-select: none;
+  }
+
+  :where(.rc-column-resizer:hover, .rc-column-resizer[data-rc-dragging])::after {
+    content: "";
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: calc(50% - 1px);
+    width: 2px;
+    background: currentColor;
+    opacity: 0.55;
+    pointer-events: none;
   }
 }

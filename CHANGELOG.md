@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-24
+
+- Display horizontal attribute columns in Roam’s right sidebar as well as the main window, including when the same page or block is open in both panes at once.
+- Balance label and value column widths proportionally against each outline’s width and nesting depth, and save dragged dividers as per-level percentages so widths scale across Small, Medium, Large, and sidebar panes.
+- Replace the viewport-only `900px` breakpoint with per-panel and per-row responsive stacking so narrow sidebars and deeply nested rows fall back to vertical outlines independently.
+- Streamline the Settings panel to **Reset column widths** and **Show row dividers** (removing the fixed label-width input, pass-through attributes input, and redundant enable switch; `roam/meta::`, `:attr/proxy` pages, and the command palette toggle remain supported).
+
 ## 2026-11-23
 
 - Hide vertical bars between attribute labels and values at every nesting depth. The resize guide appears in the middle of the gap on hover or drag. Ordinary value outlines keep their bars.

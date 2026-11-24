@@ -14,20 +14,23 @@ const RESIZER_ATTRIBUTE = "data-rc-resizer";
 const INJECTED_SELECTOR =
   `[${FOLDED_SUMMARY_BLOCK_ATTRIBUTE}], [${TRAILING_BODY_BLOCK_ATTRIBUTE}], [${RESIZER_ATTRIBUTE}]`;
 const EDITOR_SELECTOR = "textarea:is(.rm-block-input, .rm-block__input)";
-const HORIZONTAL_LAYOUT_MEDIA_QUERY = "(min-width: 900px)";
+const PANE_SELECTOR = ".roam-main, #right-sidebar";
+const MAIN_ARTICLE_SELECTOR = ".roam-main .roam-body-main .roam-article";
+const SIDEBAR_WINDOW_SELECTOR = "#right-sidebar .rm-sidebar-window";
+const LAYOUT_PANE_SELECTOR = ".roam-article, .rm-sidebar-window, #right-sidebar";
+const OUTLINE_SELECTOR = `.rm-block-children.rm-level-0, .rm-zoom-block-wrapper, .roam-log-page, ${LAYOUT_PANE_SELECTOR}`;
+const MIN_PANE_WIDTH = 340;
+const MIN_ROW_WIDTH = 260;
+const UNSTACK_MARGIN = 6;
 
 const SETTINGS_KEYS = {
   enabled: "enabled",
-  labelWidth: "labelWidth",
-  nestedLabelWidths: "nestedLabelWidths",
-  passthroughAttributes: "passthroughAttributes",
+  columnWidthRatios: "columnWidthRatios",
   rowDividers: "rowDividers",
 };
 
 const DEFAULTS = {
   enabled: true,
-  labelWidth: "18rem",
-  passthroughAttributes: "",
   rowDividers: true,
 };
 
@@ -43,10 +46,6 @@ const CLASSES = {
   trailingBodyBlock: "rc-trailing-body-block",
 };
 
-const CSS_VARS = {
-  labelWidthSetting: "--rc-label-width-setting",
-};
-
 const SUMMARY_ATTRIBUTES = ["data-rc-summary", "data-rc-child-count"];
 const HARC_ATTRIBUTES = ["data-rc-attr-model", "data-rc-harc-uid", "data-rc-attr-role"];
 const PASSTHROUGH_ATTRIBUTE = "data-rc-passthrough";
@@ -55,9 +54,13 @@ const HARC_SELECTOR = HARC_ATTRIBUTES.map((key) => `[${key}]`).join(", ");
 function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   let mutationObserver = null;
   let refreshTimeout = null;
+  let paneObserver = null;
+  let layoutFrame = null;
+  const observedPaneWidths = new Map();
+  const rowPanes = new Map();
   let commandPaletteApi = null;
   let unloaded = false;
-  let creatingTrailingBodyBlock = false;
+  let pendingBodyContainer = null;
   const layoutListeners = new AbortController();
   let drag = null;
   let suppressDividerClick = false;
@@ -66,13 +69,14 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
   let settings = {
     ...DEFAULTS,
-    nestedLabelWidths: {},
-    passthroughAttributeSet: new Set(),
+    columnWidthRatios: {},
   };
 
   const summaryCache = new Map();
+  const lastRenderedCounts = new Map();
   const markedBlocks = new Set();
-  const appliedNestedDepths = new Set();
+  const trailingBlocks = new Map();
+  const appliedDepths = new Set();
   const savingSettings = new Map();
   const summaryWatches = new Map();
   const pendingSummaryWatches = new Set();
@@ -144,10 +148,6 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     return Array.from(childrenContainer.querySelectorAll(".roam-block-container")).filter(
       (block) => !block.closest(INJECTED_SELECTOR)
     ).length;
-  }
-
-  function buildOpenRowSummary(childrenContainer) {
-    return buildSummaryFromCount(countRenderedDescendants(childrenContainer));
   }
 
   function countPulledDescendants(blockData) {
@@ -381,55 +381,20 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     return fallback;
   }
 
-  function normalizeCssLength(value, fallback) {
-    const candidate = typeof value === "string" ? value.trim() : "";
-    if (!candidate) return fallback;
-
-    try {
-      if (
-        typeof CSS !== "undefined" && CSS.supports?.("width", candidate) &&
-        CSS.supports("width", `clamp(0px, ${candidate}, 100%)`)
-      ) {
-        return candidate;
-      }
-    } catch (_) {}
-
-    return fallback;
-  }
-
-  function parsePassthroughAttributes(raw) {
-    const names = new Set();
-    if (typeof raw !== "string") return names;
-    for (const part of raw.split(/[,\r\n]+/)) {
-      const cleaned = part
-        .trim()
-        .replace(/:{1,2}$/, "")
-        .trim()
-        .replace(/^\[\[([\s\S]+)\]\]$/, "$1")
-        .trim();
-      if (cleaned) names.add(cleaned);
-    }
-    return names;
-  }
-
   function readSettings() {
-    const savedWidths = getSetting(SETTINGS_KEYS.nestedLabelWidths);
-    const nestedLabelWidths = {};
+    const savedWidths = getSetting(SETTINGS_KEYS.columnWidthRatios);
+    const columnWidthRatios = {};
     if (savedWidths && typeof savedWidths === "object" && !Array.isArray(savedWidths)) {
       for (const [depth, width] of Object.entries(savedWidths)) {
-        const length = normalizeCssLength(width, null);
-        if (/^[1-9]\d*$/.test(depth) && length) nestedLabelWidths[depth] = length;
+        if (!/^(0|[1-9]\d*)$/.test(depth)) continue;
+        if (typeof width !== "string" || !/^\d+(?:\.\d+)?%$/.test(width)) continue;
+        const percent = Number(width.slice(0, -1));
+        if (percent >= 5 && percent <= 80) columnWidthRatios[depth] = width;
       }
     }
-    const rawPassthrough = getSetting(SETTINGS_KEYS.passthroughAttributes);
-    const passthroughAttributes =
-      typeof rawPassthrough === "string" ? rawPassthrough : DEFAULTS.passthroughAttributes;
     settings = {
-      nestedLabelWidths,
-      passthroughAttributes,
-      passthroughAttributeSet: parsePassthroughAttributes(passthroughAttributes),
+      columnWidthRatios,
       enabled: normalizeBoolean(getSetting(SETTINGS_KEYS.enabled), DEFAULTS.enabled),
-      labelWidth: normalizeCssLength(getSetting(SETTINGS_KEYS.labelWidth), DEFAULTS.labelWidth),
       rowDividers: normalizeBoolean(getSetting(SETTINGS_KEYS.rowDividers), DEFAULTS.rowDividers),
     };
 
@@ -443,26 +408,12 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     return fallback;
   }
 
-  function readInputValue(eventOrValue, fallback) {
-    if (typeof eventOrValue === "string") return eventOrValue;
-    if (typeof eventOrValue?.target?.value === "string") return eventOrValue.target.value;
-    if (typeof eventOrValue?.value === "string") return eventOrValue.value;
-    return fallback;
-  }
-
   async function updateSetting(key, rawValue) {
     if (unloaded) return;
     finishDrag(false);
     let nextValue = rawValue;
     if (key === SETTINGS_KEYS.enabled || key === SETTINGS_KEYS.rowDividers) {
       nextValue = normalizeBoolean(rawValue, DEFAULTS[key]);
-    }
-    if (key === SETTINGS_KEYS.labelWidth) {
-      nextValue = normalizeCssLength(rawValue, DEFAULTS.labelWidth);
-    }
-    if (key === SETTINGS_KEYS.passthroughAttributes) {
-      nextValue = typeof rawValue === "string" ? rawValue : DEFAULTS.passthroughAttributes;
-      settings.passthroughAttributeSet = parsePassthroughAttributes(nextValue);
     }
 
     settings[key] = nextValue;
@@ -484,16 +435,15 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     const body = document.body;
     if (!root || !body) return;
 
-    root.style.setProperty(CSS_VARS.labelWidthSetting, settings.labelWidth);
-    for (const depth of appliedNestedDepths) {
-      if (!(depth in settings.nestedLabelWidths)) {
+    for (const depth of appliedDepths) {
+      if (!(depth in settings.columnWidthRatios)) {
         root.style.removeProperty(widthProperty(depth));
-        appliedNestedDepths.delete(depth);
+        appliedDepths.delete(depth);
       }
     }
-    for (const [depth, width] of Object.entries(settings.nestedLabelWidths)) {
+    for (const [depth, width] of Object.entries(settings.columnWidthRatios)) {
       root.style.setProperty(widthProperty(depth), width);
-      appliedNestedDepths.add(depth);
+      appliedDepths.add(depth);
     }
 
     body.classList.toggle(CLASSES.enabled, settings.enabled);
@@ -504,11 +454,10 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     if (typeof document === "undefined") return;
 
     document.body?.classList.remove(CLASSES.enabled, CLASSES.rowDividers);
-    document.documentElement?.style.removeProperty(CSS_VARS.labelWidthSetting);
-    appliedNestedDepths.forEach((depth) => {
+    appliedDepths.forEach((depth) => {
       document.documentElement.style.removeProperty(widthProperty(depth));
     });
-    appliedNestedDepths.clear();
+    appliedDepths.clear();
   }
 
   function findBlockEditor(main) {
@@ -590,11 +539,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   function isPassThroughTitle(title) {
-    const normalized = String(title || "").trim();
-    return (
-      normalized === "roam/meta" ||
-      Boolean(normalized && settings.passthroughAttributeSet?.has(normalized))
-    );
+    return String(title || "").trim() === "roam/meta";
   }
 
   function isPassThroughPage(page) {
@@ -651,8 +596,8 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     if (childBlocks.length === 0) return { eligible: false };
 
     if (uid) {
-      const summary = buildOpenRowSummary(children);
-      if (summary.hasChildren) summaryCache.set(uid, summary);
+      const count = countRenderedDescendants(children);
+      cache.openCounts.set(uid, Math.max(count, cache.openCounts.get(uid) || 0));
     }
 
     return {
@@ -663,11 +608,11 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     };
   }
 
-  function collectMainWindowBlocks() {
+  function collectOutlineBlocks() {
     if (typeof document === "undefined") return [];
 
     return document.querySelectorAll(
-      ".roam-main .roam-body-main .roam-article .roam-block-container"
+      `${MAIN_ARTICLE_SELECTOR} .roam-block-container, #right-sidebar .roam-block-container`
     );
   }
 
@@ -768,13 +713,6 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     return directChildMatching(values, `[${FOLDED_SUMMARY_BLOCK_ATTRIBUTE}]`);
   }
 
-  function trailingBodyBlocks(container) {
-    if (!container?.children) return [];
-    return Array.from(container.children).filter((child) =>
-      child.hasAttribute?.(TRAILING_BODY_BLOCK_ATTRIBUTE)
-    );
-  }
-
   function setFoldedSummaryBlockText(block, text) {
     const textElement = block?.querySelector?.(".rm-block-text > span");
     textElement?.classList.toggle("rm-page-ref--tag", true);
@@ -800,28 +738,31 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     foldedSummaryBlock(values)?.remove();
   }
 
-  function removeTrailingBodyBlocks(root = document) {
-    root
-      ?.querySelectorAll?.(`[${TRAILING_BODY_BLOCK_ATTRIBUTE}]`)
-      .forEach((block) => block.remove());
-  }
-
-  function isHorizontalLayoutActive() {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-      return true;
+  function removeTrailingBodyBlocks(liveContainers = new Set()) {
+    // A sidebar window can be detached with its placeholder still in it.
+    for (const [container, block] of trailingBlocks) {
+      if (!liveContainers.has(container) || block.parentElement !== container) {
+        block.remove();
+        trailingBlocks.delete(container);
+      }
     }
-
-    return window.matchMedia(HORIZONTAL_LAYOUT_MEDIA_QUERY).matches;
+    document.querySelectorAll(`[${TRAILING_BODY_BLOCK_ATTRIBUTE}]`).forEach((block) => {
+      if (trailingBlocks.get(block.parentElement) !== block) block.remove();
+    });
   }
 
-  function topLevelOutlineContainers() {
-    if (typeof document === "undefined") return [];
-
-    return Array.from(
-      document.querySelectorAll(
-        ".roam-main .roam-body-main .roam-article .rm-block-children.rm-level-0"
-      )
-    ).filter((container) => !container.closest?.(".roam-block-container"));
+  function topLevelOutlineContainers(root = document) {
+    const outline = `:is(${MAIN_ARTICLE_SELECTOR}, ${SIDEBAR_WINDOW_SELECTOR} .rm-sidebar-outline)`;
+    const zoomChildren = ".rm-zoom-block-wrapper > .roam-block-container > .rm-block-children";
+    const lists = root.querySelectorAll(
+      `${outline} .rm-block-children.rm-level-0, ${outline} ${zoomChildren}`
+    );
+    return Array.from(lists).filter((container) => {
+      if (container.closest(".rm-reference-main, .rm-embed-container")) return false;
+      const owner = container.closest(".roam-block-container");
+      if (!owner) return true;
+      return container.matches(zoomChildren) && !owner.parentElement.closest(".roam-block-container");
+    });
   }
 
   function directTopLevelBlocks(container) {
@@ -829,43 +770,29 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   function shouldShowTrailingBodyBlock(container) {
-    if (!settings.enabled || creatingTrailingBodyBlock || !isHorizontalLayoutActive()) {
-      return false;
-    }
+    if (!settings.enabled) return false;
 
     const blocks = directTopLevelBlocks(container);
     if (blocks.length === 0) return false;
 
     const lastBlock = blocks[blocks.length - 1];
-    return lastBlock.classList.contains(CLASSES.row);
+    return lastBlock.classList.contains(CLASSES.row) && !lastBlock.hasAttribute("data-rc-stacked");
   }
 
   function syncTrailingBodyBlocks() {
     if (typeof document === "undefined") return;
 
-    const containers = topLevelOutlineContainers();
-    const liveContainers = new Set(containers);
-
-    document.querySelectorAll(`[${TRAILING_BODY_BLOCK_ATTRIBUTE}]`).forEach((block) => {
-      if (!liveContainers.has(block.parentElement)) block.remove();
-    });
-
-    containers.forEach((container) => {
-      const [existing, ...duplicates] = trailingBodyBlocks(container);
-      duplicates.forEach((block) => block.remove());
-
-      if (!shouldShowTrailingBodyBlock(container)) {
-        existing?.remove();
-        return;
+    const containers = new Set(topLevelOutlineContainers().filter(shouldShowTrailingBodyBlock));
+    removeTrailingBodyBlocks(containers);
+    for (const container of containers) {
+      let block = trailingBlocks.get(container);
+      if (!block) {
+        if (container === pendingBodyContainer) continue;
+        block = createTrailingBodyBlock();
+        trailingBlocks.set(container, block);
       }
-
-      if (existing) {
-        if (existing !== container.lastElementChild) container.append(existing);
-        return;
-      }
-
-      container.append(createTrailingBodyBlock());
-    });
+      if (container.lastElementChild !== block) container.append(block);
+    }
   }
 
   function getRoamAlphaApi() {
@@ -897,13 +824,8 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     );
   }
 
-  function getVisibleMainWindowTitle() {
-    if (typeof document === "undefined") return "";
-
-    const titleElement = document.querySelector(
-      ".roam-main .roam-body-main .rm-title-display, " +
-        ".roam-main .roam-body-main .rm-title-textarea"
-    );
+  function getVisibleTitle(pane) {
+    const titleElement = pane.querySelector(".rm-title-display, .rm-title-textarea");
 
     if ("value" in (titleElement || {})) {
       return normalizeText(titleElement.value);
@@ -937,19 +859,61 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     }
   }
 
-  async function getTrailingBodyParentUid(triggerBlock) {
-    const openUid = await getOpenPageOrBlockUid();
-    if (openUid) return openUid;
+  function getOutlineParentUid(container) {
+    const ownerUid = getBlockUid(container.parentElement);
+    if (ownerUid) return ownerUid;
+    const uid = getBlockUid(directTopLevelBlocks(container).at(-1));
+    if (!uid) return "";
+    try {
+      const block = pullData("[{:block/_children [:block/uid]}]", [":block/uid", uid]);
+      const [parent] = refs(block, ":block/_children");
+      return getKeywordValue(parent, ":block/uid") || "";
+    } catch (error) {
+      warn(`Could not pull parent UID for block ${uid}.`, error);
+      return "";
+    }
+  }
 
-    const container = triggerBlock?.parentElement;
-    const blocks = directTopLevelBlocks(container);
-    const lastRealBlock = blocks[blocks.length - 1];
-    const pageUid = pullPageUidForBlockUid(getBlockUid(lastRealBlock));
-    if (pageUid) return pageUid;
+  function getSidebarBodyLocation(panel, parentUid) {
+    // A window can zoom within its original outline. Its displayed parent
+    // determines where to append, while its window ID determines where to focus.
+    const windowId = panel.dataset.sidebarWindowId;
+    const windows = getRoamUiApi()?.rightSidebar?.getWindows?.() || [];
+    const outlines = windows.filter((entry) => entry?.type === "outline" || entry?.type === "block");
+    const matches = outlines.filter((entry) => {
+      if (windowId) return entry["window-id"] === windowId;
+      return parentUid && !entry["collapsed?"] && (entry["block-uid"] || entry["page-uid"]) === parentUid;
+    });
+    if (matches.length !== 1 || !matches[0]["window-id"]) return null;
+    const [entry] = matches;
+    if (!windowId) {
+      // Another panel may already own this ID or be zoomed to the same outline.
+      for (const other of document.querySelectorAll(SIDEBAR_WINDOW_SELECTOR)) {
+        if (other === panel) continue;
+        if (other.dataset.sidebarWindowId === entry["window-id"]) return null;
+        if (other.dataset.sidebarWindowId) continue;
+        if (topLevelOutlineContainers(other).some((list) => getOutlineParentUid(list) === parentUid)) return null;
+      }
+    }
+    return {
+      pane: panel,
+      windowId: entry["window-id"],
+      parentUid: parentUid || entry["block-uid"] || entry["page-uid"],
+    };
+  }
 
-    const pageTitle = getPageTitleFromBlock(lastRealBlock) || getVisibleMainWindowTitle();
+  async function getTrailingBodyLocation(container) {
+    const outlineUid = getOutlineParentUid(container);
+    const panel = container.closest(SIDEBAR_WINDOW_SELECTOR);
+    if (panel) return getSidebarBodyLocation(panel, outlineUid);
 
-    return pullPageUidByTitle(pageTitle);
+    const pane = container.closest(MAIN_ARTICLE_SELECTOR);
+    if (!pane) return null;
+    const lastBlock = directTopLevelBlocks(container).at(-1);
+    const parentUid = outlineUid || await getOpenPageOrBlockUid() ||
+      pullPageUidForBlockUid(getBlockUid(lastBlock)) ||
+      pullPageUidByTitle(getPageTitleFromBlock(lastBlock) || getVisibleTitle(pane));
+    return { pane, windowId: "main-window", parentUid };
   }
 
   function generateUid() {
@@ -957,32 +921,34 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     return typeof generate === "function" ? generate() : "";
   }
 
-  async function waitForBlockToRender(uid) {
-    if (!uid || typeof document === "undefined") return;
-
-    for (let attempt = 0; !unloaded && attempt < 10; attempt += 1) {
-      if (document.querySelector(`[data-block-uid="${uid}"]`)) return;
+  async function waitForBlockToRender(uid, pane) {
+    for (let attempt = 0; !unloaded && pane.isConnected && attempt < 10; attempt += 1) {
+      const rendered = topLevelOutlineContainers(pane).some((container) =>
+        directChildBlocks(container).some((block) => getBlockUid(block) === uid)
+      );
+      if (rendered) return true;
       await new Promise((resolve) => {
         finishFocusWait = resolve;
         focusTimer = window.setTimeout(resolve, 40);
       });
       finishFocusWait = focusTimer = null;
     }
+    return false;
   }
 
-  async function focusBlock(uid) {
+  async function focusBlock(uid, { pane, windowId }) {
     const uiApi = getRoamUiApi();
     const focus = uiApi?.setBlockFocusAndSelection;
     if (!uid || typeof focus !== "function") return;
 
-    await waitForBlockToRender(uid);
-    if (unloaded) return;
+    if (!(await waitForBlockToRender(uid, pane)) || unloaded) return;
+    if (pane.dataset.sidebarWindowId && pane.dataset.sidebarWindowId !== windowId) return;
 
     try {
       await focus.call(uiApi, {
         location: {
           "block-uid": uid,
-          "window-id": "main-window",
+          "window-id": windowId,
         },
         selection: {
           start: 0,
@@ -1021,21 +987,25 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   async function activateTrailingBodyBlock(block) {
-    if (creatingTrailingBodyBlock) return;
+    const container = block.parentElement;
+    if (pendingBodyContainer || !shouldShowTrailingBodyBlock(container)) return;
+    if (!topLevelOutlineContainers().includes(container)) return;
 
-    creatingTrailingBodyBlock = true;
+    pendingBodyContainer = container;
     block?.setAttribute?.(TRAILING_BODY_PENDING_ATTRIBUTE, "true");
 
     try {
-      const parentUid = await getTrailingBodyParentUid(block);
-      if (unloaded) return;
-      removeTrailingBodyBlocks();
-      const uid = await createTrailingBodyBlockInGraph(parentUid);
-      await focusBlock(uid);
+      const location = await getTrailingBodyLocation(container);
+      if (unloaded || !block.isConnected) return;
+      if (!location?.parentUid) throw new Error("Could not identify the outline for this body block.");
+      block.remove();
+      const uid = await createTrailingBodyBlockInGraph(location.parentUid);
+      await focusBlock(uid, location);
     } catch (error) {
       warn("Could not create trailing body block.", error);
     } finally {
-      creatingTrailingBodyBlock = false;
+      block.removeAttribute(TRAILING_BODY_PENDING_ATTRIBUTE);
+      pendingBodyContainer = null;
       scheduleRefresh();
     }
   }
@@ -1055,16 +1025,14 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   }
 
   function widthProperty(depth) {
-    return Number(depth) === 0 ? CSS_VARS.labelWidthSetting : `--rc-label-width-depth-${depth}`;
+    return `--rc-label-width-depth-${depth}`;
   }
 
   function saveWidth(depth, width) {
-    if (depth === 0) return updateSetting(SETTINGS_KEYS.labelWidth, width || DEFAULTS.labelWidth);
-
-    const widths = { ...settings.nestedLabelWidths };
+    const widths = { ...settings.columnWidthRatios };
     if (width) widths[depth] = width;
     else delete widths[depth];
-    return updateSetting(SETTINGS_KEYS.nestedLabelWidths, widths);
+    return updateSetting(SETTINGS_KEYS.columnWidthRatios, widths);
   }
 
   function ensureResizer(row) {
@@ -1105,9 +1073,17 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     if (!drag || event.pointerId !== drag.pointerId) return;
     stopEvent(event);
     const delta = (event.clientX - drag.startX) * drag.direction;
-    const pixels = Math.round(Math.min(drag.max, Math.max(drag.min, drag.startWidth + delta)));
-    drag.width = delta === 0 ? null : `${pixels}px`;
+    const pixels = Math.min(drag.max, Math.max(drag.min, drag.startWidth + delta));
+    const percent = Math.max(5, Math.min(80, Math.round(pixels / drag.rowWidth * 1000) / 10));
+    drag.width = delta === 0 ? null : `${percent}%`;
     document.documentElement.style.setProperty(widthProperty(drag.depth), drag.width || drag.previous);
+    scheduleLayout();
+  }
+
+  function rowContentWidth(row, style = getComputedStyle(row)) {
+    const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    const border = parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
+    return row.getBoundingClientRect().width - padding - border;
   }
 
   function beginDrag(event, handle) {
@@ -1122,9 +1098,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     const labelRect = label.getBoundingClientRect();
     const valueRect = values.getBoundingClientRect();
     const gap = rtl ? labelRect.left - valueRect.right : valueRect.left - labelRect.right;
-    const horizontalPadding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
-    const horizontalBorder = parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
-    const rowWidth = row.getBoundingClientRect().width - horizontalPadding - horizontalBorder;
+    const rowWidth = rowContentWidth(row, style);
     if (rowWidth <= 0 || labelRect.width <= 0) return;
 
     // Match the grid's responsive bounds even inside a narrow nested value.
@@ -1139,8 +1113,9 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
       startX: event.clientX,
       direction: rtl ? -1 : 1,
       startWidth: labelRect.width,
-      min: Math.min(80, available * 0.35),
-      max: available - Math.min(150, available * 0.5),
+      rowWidth,
+      min: Math.min(96, available * 0.35),
+      max: available - Math.min(140, available * 0.5),
       previous: document.documentElement.style.getPropertyValue(widthProperty(depth)),
       width: null,
     };
@@ -1153,8 +1128,14 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     window.addEventListener("pointermove", moveDrag, options);
     window.addEventListener("pointerup", (up) => {
       if (up.pointerId !== drag.pointerId) return;
+      // A pane resize during the gesture invalidates its starting grid geometry.
+      if (!handle.isConnected || Math.abs(rowContentWidth(row) - drag.rowWidth) > 0.5) {
+        stopEvent(up);
+        finishDrag(false);
+        return;
+      }
       moveDrag(up);
-      finishDrag(handle.isConnected);
+      finishDrag(true);
     }, options);
     const cancelPointer = (end) => {
       if (end.pointerId === drag.pointerId) finishDrag(false);
@@ -1183,7 +1164,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
       return;
     }
     const handle = event.target.closest?.(`.${CLASSES.row} > [${RESIZER_ATTRIBUTE}]`);
-    if (!handle || !settings.enabled || !isHorizontalLayoutActive()) return;
+    if (!handle || !settings.enabled || handle.parentElement.hasAttribute("data-rc-stacked")) return;
     stopEvent(event);
     if (event.type === "pointerdown") beginDrag(event, handle);
     if (event.type === "dblclick") void saveWidth(Number(handle.parentElement.dataset.rcDepth), null);
@@ -1203,7 +1184,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     row.setAttribute("data-rc-child-count", String(summary.childCount ?? ""));
   }
 
-  function markRow(row, descriptor, depth) {
+  function markRow(row, descriptor, depth, maxDepth) {
     const parts = getRowParts(row);
     markedBlocks.add(row);
     row.removeAttribute(PASSTHROUGH_ATTRIBUTE);
@@ -1225,14 +1206,10 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     parts.values?.classList.toggle(CLASSES.values, true);
     if (parts.values) removeFoldedSummaryBlock(row);
     if (row.dataset.rcDepth !== String(depth)) row.dataset.rcDepth = String(depth);
-    if (depth) {
-      row.style.setProperty(
-        "--rc-row-label-width",
-        `var(${widthProperty(depth)}, min(var(--rc-label-width), 38%))`
-      );
-    } else {
-      row.style.removeProperty("--rc-row-label-width");
-    }
+    // Each remaining label gets one share, and the final value gets 2.5.
+    const percent = (100 / (1 + maxDepth - depth + 2.5)).toFixed(3);
+    const automatic = `min(${percent}%, ${depth === 0 ? "16rem" : "15rem"})`;
+    row.style.setProperty("--rc-row-label-width", `var(${widthProperty(depth)}, ${automatic})`);
     ensureResizer(row);
 
     applyRowSummary(row, descriptor.summary);
@@ -1253,6 +1230,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     HARC_ATTRIBUTES.forEach((key) => row.removeAttribute(key));
     row.removeAttribute(PASSTHROUGH_ATTRIBUTE);
     delete row.dataset.rcDepth;
+    delete row.dataset.rcStacked;
     row.style.removeProperty("--rc-row-label-width");
     directChildMatching(row, `[${RESIZER_ATTRIBUTE}]`)?.remove();
     removeFoldedSummaryBlock(row);
@@ -1297,29 +1275,45 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     }
 
     const candidates = new Map();
-    const cache = { blocks: new Map(), pages: new Map() };
+    const cache = { blocks: new Map(), pages: new Map(), openCounts: new Map() };
     const childDepths = new WeakMap();
+    const outlineDepths = new Map();
+    rowPanes.clear();
     activeClosedRowUids.clear();
     // querySelectorAll visits parents first. Ordinary blocks pass the depth through.
-    for (const block of collectMainWindowBlocks()) {
+    for (const block of collectOutlineBlocks()) {
       const parent = block.parentElement?.closest(".roam-block-container");
-      const depth = childDepths.get(parent) || 0;
+      const ancestor = childDepths.get(parent);
+      // A zoomed block's child list can itself be rm-level-0. Keep that tree together.
+      const outline = ancestor?.outline || block.closest(OUTLINE_SELECTOR);
+      const depth = ancestor?.depth || 0;
       const descriptor = getAttributeRowDescriptor(block, cache);
-      childDepths.set(block, depth + Number(descriptor.eligible));
+      childDepths.set(block, { outline, depth: depth + Number(descriptor.eligible) });
       if (!descriptor.eligible && !descriptor.passthrough) continue;
-      candidates.set(block, { descriptor, depth });
+      candidates.set(block, { descriptor, depth, outline });
+      if (descriptor.eligible) {
+        outlineDepths.set(outline, Math.max(depth, outlineDepths.get(outline) || 0));
+        rowPanes.set(block, block.closest(LAYOUT_PANE_SELECTOR));
+      }
       if (descriptor.closed) activeClosedRowUids.add(getBlockUid(block));
     }
+    // A rendered copy can hide descendants. Keep its count as a fallback,
+    // separate from the graph counts shared by folded copies of the same UID.
+    cache.openCounts.forEach((count, uid) => lastRenderedCounts.set(uid, count));
     markedBlocks.forEach((row) => {
       if (!candidates.has(row)) unmarkRow(row);
     });
-    candidates.forEach(({ descriptor, depth }, block) => {
+    candidates.forEach(({ descriptor, depth, outline }, block) => {
       if (descriptor.passthrough) {
         if (block.classList.contains(CLASSES.row)) unmarkRow(block);
         markedBlocks.add(block);
         block.setAttribute(PASSTHROUGH_ATTRIBUTE, "true");
       } else {
-        markRow(block, descriptor, depth);
+        if (descriptor.summary?.pending) {
+          const count = lastRenderedCounts.get(getBlockUid(block));
+          if (count) descriptor.summary = buildSummaryFromCount(count);
+        }
+        markRow(block, descriptor, depth, outlineDepths.get(outline));
       }
     });
     summaryWatches.forEach((_, uid) => {
@@ -1327,7 +1321,8 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     });
     activeClosedRowUids.forEach((uid) => void ensureClosedRowWatch(uid));
     clearStrayPartMarks();
-    syncTrailingBodyBlocks();
+    syncObservedPanes();
+    scheduleLayout();
   }
 
   function scheduleRefresh() {
@@ -1337,6 +1332,8 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
 
   function clearRowMarks() {
     if (typeof document === "undefined") return;
+    rowPanes.clear();
+    syncObservedPanes();
     markedBlocks.forEach(unmarkRow);
     document.querySelectorAll(`.${CLASSES.row}, [data-rc-depth]`).forEach(unmarkRow);
     clearStrayPartMarks();
@@ -1344,14 +1341,70 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     removeAllClosedRowWatches();
   }
 
-  function handleResize() {
-    if (drag && !isHorizontalLayoutActive()) finishDrag(false);
-    scheduleRefresh();
+  function syncObservedPanes() {
+    if (!paneObserver) return;
+    const panes = new Set(rowPanes.values());
+    for (const pane of observedPaneWidths.keys()) {
+      if (!panes.has(pane)) {
+        paneObserver.unobserve(pane);
+        observedPaneWidths.delete(pane);
+      }
+    }
+    for (const pane of panes) {
+      if (!observedPaneWidths.has(pane)) {
+        observedPaneWidths.set(pane, null);
+        paneObserver.observe(pane);
+      }
+    }
+  }
+
+  function scheduleLayout() {
+    if (unloaded || layoutFrame !== null) return;
+    layoutFrame = window.requestAnimationFrame
+      ? window.requestAnimationFrame(updateLayout)
+      : window.setTimeout(updateLayout, 16);
+  }
+
+  function updateLayout() {
+    layoutFrame = null;
+    const paneWidths = new Map();
+    const changes = [];
+    for (const [row, pane] of rowPanes) {
+      if (!paneWidths.has(pane)) paneWidths.set(pane, pane.getBoundingClientRect().width);
+      const paneWidth = paneWidths.get(pane);
+      const rowWidth = row.getBoundingClientRect().width;
+      if (!paneWidth || !rowWidth) continue;
+      const stacked = row.hasAttribute("data-rc-stacked");
+      const margin = stacked ? UNSTACK_MARGIN : 0;
+      const shouldStack = paneWidth < MIN_PANE_WIDTH + margin || rowWidth < MIN_ROW_WIDTH + margin;
+      if (stacked !== shouldStack) changes.push([row, shouldStack]);
+    }
+    // Batch layout reads before writes. Recheck descendants after an ancestor changes layout.
+    for (const [row, stacked] of changes) {
+      if (stacked) {
+        row.dataset.rcStacked = "true";
+        if (drag?.handle.parentElement === row) finishDrag(false);
+      } else {
+        delete row.dataset.rcStacked;
+      }
+    }
+    if (changes.length) scheduleLayout();
+    syncTrailingBodyBlocks();
   }
 
   function startLayoutListeners() {
     const options = { capture: true, signal: layoutListeners.signal };
-    window.addEventListener("resize", handleResize, { signal: layoutListeners.signal });
+    if (typeof ResizeObserver !== "undefined") {
+      paneObserver = new ResizeObserver((entries) => {
+        for (const { target, contentRect } of entries) {
+          if (observedPaneWidths.has(target) && observedPaneWidths.get(target) !== contentRect.width) {
+            observedPaneWidths.set(target, contentRect.width);
+            scheduleLayout();
+          }
+        }
+      });
+    }
+    window.addEventListener("resize", scheduleLayout, { signal: layoutListeners.signal });
     for (const event of ["pointerdown", "mousedown", "click", "dblclick"]) {
       document.addEventListener(event, handleDividerEvent, options);
     }
@@ -1361,27 +1414,35 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
   function startObserver() {
     if (typeof MutationObserver === "undefined" || typeof document === "undefined") return;
 
-    // The main window can itself be replaced during navigation.
+    // Either pane can be mounted or removed below the observer target.
     const target = document.body;
     if (!target) return;
 
     mutationObserver = new MutationObserver((records) => {
       if (drag && !drag.handle.isConnected) finishDrag(false);
-      if (drag) return;
       const changed = records.some((record) => {
         const element = record.target.nodeType === Node.ELEMENT_NODE
           ? record.target : record.target.parentElement;
         if (element?.closest(INJECTED_SELECTOR)) return false;
-        if (!element?.closest(".roam-main")) {
+        const inPane = element?.closest(PANE_SELECTOR);
+        // Page-width settings can resize an inner wrapper while its observed pane stays fixed.
+        if (record.attributeName === "style" || (record.attributeName === "class" && !inPane)) {
+          if (inPane || element?.querySelector(PANE_SELECTOR)) scheduleLayout();
+          return false;
+        }
+        if (!inPane) {
           if (record.type !== "childList") return false;
           return [...record.addedNodes, ...record.removedNodes].some((node) =>
-            node.matches?.(".roam-main") || node.querySelector?.(".roam-main")
+            node.matches?.(PANE_SELECTOR) || node.querySelector?.(PANE_SELECTOR)
           );
         }
-        if (record.type !== "childList" || record.removedNodes.length) return true;
-        return Array.from(record.addedNodes).some((node) => !node.matches?.(INJECTED_SELECTOR));
+        if (record.type !== "childList") return true;
+        return [...record.addedNodes, ...record.removedNodes].some((node) => !node.matches?.(INJECTED_SELECTOR));
       });
-      if (changed) scheduleRefresh();
+      if (changed) {
+        if (drag) scheduleLayout();
+        else scheduleRefresh();
+      }
     });
 
     mutationObserver.observe(target, {
@@ -1389,7 +1450,7 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
       subtree: true,
       attributes: true,
       characterData: true,
-      attributeFilter: ["class", "data-block-uid", "data-page-links", "data-link-uid", "data-link-title", "data-tag"],
+      attributeFilter: ["class", "style", "data-block-uid", "data-page-links", "data-link-uid", "data-link-title", "data-tag"],
     });
   }
 
@@ -1401,62 +1462,13 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
       tabTitle: "Roam Attribute Columns",
       settings: [
         {
-          id: SETTINGS_KEYS.enabled,
-          name: "Enable horizontal attributes",
-          description: "Align attribute labels and child blocks in a two-column view.",
-          action: {
-            type: "switch",
-            onChange: (eventOrValue) => {
-              void updateSetting(
-                SETTINGS_KEYS.enabled,
-                readSwitchValue(eventOrValue, settings.enabled)
-              );
-            },
-          },
-        },
-        {
-          id: SETTINGS_KEYS.labelWidth,
-          name: "Label column width",
-          description: "Top-level label width (default 18rem). Drag a divider to resize its level, " +
-            "or double-click to reset it.",
-          action: {
-            type: "input",
-            placeholder: DEFAULTS.labelWidth,
-            onChange: (eventOrValue) => {
-              void updateSetting(
-                SETTINGS_KEYS.labelWidth,
-                readInputValue(eventOrValue, settings.labelWidth)
-              );
-            },
-          },
-        },
-        {
           id: "resetColumnWidths",
           name: "Reset column widths",
-          description: "Restore the top-level width and all nested widths.",
+          description: "Restore all resized columns to their automatic responsive widths.",
           action: {
             type: "button",
             content: "Reset column widths",
-            onClick: () => Promise.all([
-              saveWidth(0, null),
-              updateSetting(SETTINGS_KEYS.nestedLabelWidths, {}),
-            ]),
-          },
-        },
-        {
-          id: SETTINGS_KEYS.passthroughAttributes,
-          name: "Pass-through attributes",
-          description:
-            "Comma-separated attribute names kept as collapsible headers while their child attributes use the parent column depth. roam/meta and Roam's :attr/proxy pages are always included.",
-          action: {
-            type: "input",
-            placeholder: "Metadata, Frontmatter",
-            onChange: (eventOrValue) => {
-              void updateSetting(
-                SETTINGS_KEYS.passthroughAttributes,
-                readInputValue(eventOrValue, settings.passthroughAttributes)
-              );
-            },
+            onClick: () => updateSetting(SETTINGS_KEYS.columnWidthRatios, {}),
           },
         },
         {
@@ -1527,11 +1539,6 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
     unloaded = false;
 
     await setSettingDefault(SETTINGS_KEYS.enabled, DEFAULTS.enabled);
-    await setSettingDefault(SETTINGS_KEYS.labelWidth, DEFAULTS.labelWidth);
-    await setSettingDefault(
-      SETTINGS_KEYS.passthroughAttributes,
-      DEFAULTS.passthroughAttributes
-    );
     await setSettingDefault(SETTINGS_KEYS.rowDividers, DEFAULTS.rowDividers);
 
     if (unloaded) return;
@@ -1565,11 +1572,19 @@ function createRoamAttributeColumnsExtension({ extensionAPI } = {}) {
       mutationObserver = null;
     }
 
+    paneObserver?.disconnect();
+    paneObserver = null;
+    observedPaneWidths.clear();
+    if (layoutFrame !== null) {
+      if (window.cancelAnimationFrame) window.cancelAnimationFrame(layoutFrame);
+      else window.clearTimeout(layoutFrame);
+    }
     layoutListeners.abort();
     removeCommand();
     clearRowMarks();
     clearDocumentSettings();
     summaryCache.clear();
+    lastRenderedCounts.clear();
 
     console.log("[Roam Attribute Columns] Unloaded.");
   }
